@@ -3,6 +3,7 @@
 # Check if we should keep the binary
 KEEP_BINARY=false
 USE_SYSTEM_BINARY=false
+NO_BUILD=false
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -12,6 +13,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         "--use-system")
             USE_SYSTEM_BINARY=true
+            shift
+            ;;
+        "--no-build")
+            NO_BUILD=true
             shift
             ;;
         *)
@@ -45,13 +50,17 @@ print_error() {
 
 # Build the binary if not using system binary
 if [ "$USE_SYSTEM_BINARY" = false ]; then
-    print_status "Building landrun binary..."
-    go build -o landrun cmd/landrun/main.go
-    if [ $? -ne 0 ]; then
-        print_error "Failed to build landrun binary"
-        exit 1
-    fi
-    print_success "Binary built successfully"
+	if [ "$NO_BUILD" = false ]; then
+		print_status "Building landrun binary..."
+		go build -o landrun cmd/landrun/main.go
+		if [ $? -ne 0 ]; then
+			print_error "Failed to build landrun binary"
+			exit 1
+		fi
+		print_success "Binary built successfully"
+	else
+		print_success "Using already built landrun binary"
+	fi
 fi
 
 # Create test directories
