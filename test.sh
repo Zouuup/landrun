@@ -239,11 +239,11 @@ run_test "No configuration" \
 
 # Process creation and redirection tests
 run_test "Process creation with pipe" \
-    "./landrun --log-level debug --rox / -- bash -c 'ls /usr | grep bin'" \
+    "./landrun --log-level debug --rox / --env PATH -- bash -c 'ls /usr | grep bin'" \
     0
 
 run_test "File redirection" \
-    "./landrun --log-level debug --rox / --rw $RW_DIR -- bash -c 'ls /usr > $RW_DIR/output.txt && cat $RW_DIR/output.txt'" \
+    "./landrun --log-level debug --rox / --rw $RW_DIR --env PATH -- bash -c 'ls /usr > $RW_DIR/output.txt && cat $RW_DIR/output.txt'" \
     0
 
 # Network restrictions tests (if kernel supports it)
@@ -266,16 +266,16 @@ run_test "Environment isolation (no variables should be passed)" \
     0
 
 run_test "Passing specific environment variable" \
-    "./landrun --log-level debug --rox /usr --ro / --env TEST_ENV_VAR -- bash -c 'echo \$TEST_ENV_VAR | grep \"test_value_123\"'" \
+    "./landrun --log-level debug --rox /usr --ro / --env TEST_ENV_VAR --env PATH -- bash -c 'echo \$TEST_ENV_VAR | grep \"test_value_123\"'" \
     0
 
 run_test "Passing custom environment variable" \
-    "./landrun --log-level debug --rox /usr --ro / --env CUSTOM_VAR=custom_value -- bash -c 'echo \$CUSTOM_VAR | grep \"custom_value\"'" \
+    "./landrun --log-level debug --rox /usr --ro / --env CUSTOM_VAR=custom_value --env PATH -- bash -c 'echo \$CUSTOM_VAR | grep \"custom_value\"'" \
     0
 
 # Combining different permission types
 run_test "Mixed permissions" \
-    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --rox $EXEC_DIR --rwx $RW_DIR -- bash -c '$EXEC_DIR/test.sh > $RW_DIR/output.txt && cat $RW_DIR/output.txt'" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --rox $EXEC_DIR --rwx $RW_DIR --env PATH -- bash -c '$EXEC_DIR/test.sh > $RW_DIR/output.txt && cat $RW_DIR/output.txt'" \
     0
 
 # Specific regression tests for bugs we fixed
