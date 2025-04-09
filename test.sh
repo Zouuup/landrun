@@ -4,6 +4,8 @@
 KEEP_BINARY=false
 USE_SYSTEM_BINARY=false
 NO_BUILD=false
+# Whether we should try to do network calls during testing.
+INTERNET_ACCESS=true
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -17,6 +19,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         "--no-build")
             NO_BUILD=true
+            shift
+            ;;
+        "--offline")
+            INTERNET_ACCESS=false
             shift
             ;;
         *)
@@ -241,11 +247,11 @@ run_test "File redirection" \
     0
 
 # Network restrictions tests (if kernel supports it)
-run_test "TCP connection without permission" \
+$INTERNET_ACCESS && run_test "TCP connection without permission" \
     "./landrun --log-level debug --rox /usr --ro / -- curl -s --connect-timeout 2 https://example.com" \
     7
 
-run_test "TCP connection with permission" \
+$INTERNET_ACCESS && run_test "TCP connection with permission" \
     "./landrun --log-level debug --rox /usr --ro / --connect-tcp 443 -- curl -s --connect-timeout 2 https://example.com" \
     0
 
@@ -285,7 +291,7 @@ run_test "Unrestricted filesystem access" \
     "./landrun --log-level debug --unrestricted-filesystem ls /usr" \
     0
 
-run_test "Unrestricted network access" \
+$INTERNET_ACCESS && run_test "Unrestricted network access" \
     "./landrun --log-level debug --unrestricted-network --rox /usr --ro /etc -- curl -s --connect-timeout 2 https://example.com" \
     0
 
@@ -293,7 +299,7 @@ run_test "Restricted filesystem access" \
     "./landrun --log-level debug ls /usr" \
     1
 
-run_test "Restricted network access" \
+$INTERNET_ACCESS && run_test "Restricted network access" \
     "./landrun --log-level debug --rox /usr --ro /etc -- curl -s --connect-timeout 2 https://example.com" \
     7
 
