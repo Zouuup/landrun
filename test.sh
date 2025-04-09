@@ -136,7 +136,7 @@ run_test() {
 # Test cases
 print_status "Starting test cases..."
 
-Basic access tests
+# Basic access tests
 run_test "Read-only access to file" \
     "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- cat $RO_DIR/test.txt" \
     0
