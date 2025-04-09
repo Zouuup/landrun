@@ -185,7 +185,7 @@ run_test "Execute a file with --add-exec flag" \
     0
 
 run_test "Execute a file with --add-exec and --ldd flag" \
-    "./landrun --log-level debug --add-exec --ldd -- /usr/bin/true" \
+    "./landrun --log-level debug --add-exec --ldd -- $(which true)" \
     0
 
 
@@ -280,11 +280,11 @@ run_test "Mixed permissions" \
 
 # Specific regression tests for bugs we fixed
 run_test "Root path traversal regression test" \
-    "./landrun --log-level debug --rox /usr -- /usr/bin/ls /usr" \
+    "./landrun --log-level debug --rox /usr -- $(which ls) /usr" \
     0
 
 run_test "Execute from read-only paths regression test" \
-    "./landrun --log-level debug --rox /usr --ro /usr/bin -- /usr/bin/id" \
+    "./landrun --log-level debug --rox /usr --ro /usr/bin -- $(which id)" \
     0
 
 run_test "Unrestricted filesystem access" \
