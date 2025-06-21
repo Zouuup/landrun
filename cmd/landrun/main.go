@@ -25,12 +25,32 @@ func getLibraryDependencies(binary string) ([]string, error) {
 	var libPaths []string
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
-		// Skip empty lines and the first line (usually the binary name)
-		if line == "" || !strings.Contains(line, "=>") {
+		// Skip lines without shared information about shared objects
+		if !strings.Contains(line, ".so") {
 			continue
 		}
 		// Extract the library path
 		parts := strings.Fields(line)
+
+		// Add only shared objects which are a **path**, because sometimes
+		// they are present as `<shared-object-absolute-path> (<addr>)`
+		// instead of `<shared-object-name> => <absolute-path> (<addr>)`.
+		// And `ld-linux` sometimes has that behaviour and not including it
+		// in `libPaths` definitely results in an error in executing the
+		// binary.
+		//
+		// For example, the line `/lib/ld-linux-aarch64.so.1 (<addr>)` will
+		// match and the path `/lib/ld-linux-aarch64.so.1` will be added to
+		// `libPaths`. The line `linux-vdso.so.1 (<addr>)` will not match as
+		// `linux-vdso.so.1` is not a path so we have nothing to
+		// "whitelist" per se.
+		if len(parts) == 2 {
+			libPath := strings.Trim(parts[0], "()")
+			if strings.Contains(libPath, "/") {
+				libPaths = append(libPaths, libPath)
+			}
+		}
+
 		if len(parts) >= 3 {
 			libPath := strings.Trim(parts[2], "()")
 			if libPath != "" {
