@@ -51,6 +51,62 @@ func TestParseAndResolveTrue(t *testing.T) {
 	}
 }
 
+func TestRecursiveDependencies(t *testing.T) {
+	if _, err := exec.LookPath("gcc"); err != nil {
+		t.Skip("gcc not found, skipping test")
+	}
+	// Create a temporary directory for compiled artifacts
+	tempDir := t.TempDir()
+
+	// Compile liba.so
+	libaSrc := "testdata/liba.c"
+	libaSo := filepath.Join(tempDir, "liba.so")
+	cmd := exec.Command("gcc", "-fPIC", "-shared", "-o", libaSo, libaSrc)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to compile liba.so: %v\n%s", err, string(out))
+	}
+
+	// Compile libb.so
+	libbSrc := "testdata/libb.c"
+	libbSo := filepath.Join(tempDir, "libb.so")
+	cmd = exec.Command("gcc", "-fPIC", "-shared", "-o", libbSo, libbSrc, "-L"+tempDir, "-la", "-Wl,-rpath,$ORIGIN")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to compile libb.so: %v\n%s", err, string(out))
+	}
+
+	// Compile test_binary
+	mainSrc := "testdata/main.c"
+	testBin := filepath.Join(tempDir, "test_binary")
+	cmd = exec.Command("gcc", "-o", testBin, mainSrc, "-L"+tempDir, "-lb", "-Wl,-rpath,$ORIGIN")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to compile test_binary: %v\n%s", err, string(out))
+	}
+
+	// Run the actual test logic
+	deps, err := GetLibraryDependencies(testBin)
+	if err != nil {
+		t.Fatalf("GetLibraryDependencies failed: %v", err)
+	}
+
+	foundA := false
+	foundB := false
+	for _, dep := range deps {
+		if dep == libaSo {
+			foundA = true
+		}
+		if dep == libbSo {
+			foundB = true
+		}
+	}
+
+	if !foundA {
+		t.Errorf("expected to find %s in dependency list, but didn't. Found: %v", libaSo, deps)
+	}
+	if !foundB {
+		t.Errorf("expected to find %s in dependency list, but didn't. Found: %v", libbSo, deps)
+	}
+}
+
 func TestGetLibraryDependencies(t *testing.T) {
 	bin, err := exec.LookPath("true")
 	if err != nil {

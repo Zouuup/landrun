@@ -2,7 +2,6 @@ package elfdeps
 
 import (
 	"debug/elf"
-	"fmt"
 	"io"
 	"os"
 	osexec "os/exec"
@@ -174,29 +173,52 @@ func resolveSonames(needed []string, rpaths []string) []string {
 
 // GetLibraryDependencies returns a list of library paths that the given binary depends on
 func GetLibraryDependencies(binary string) ([]string, error) {
-	f, err := elf.Open(binary)
-	if err != nil {
-		return nil, fmt.Errorf("open ELF %s: %w", binary, err)
-	}
-	defer f.Close()
-
-	interpPath := parseInterp(f)
-	needed, rpaths := parseDynamic(f)
-	origin := filepath.Dir(binary)
-	rpaths = normalizeRpaths(rpaths, origin)
-	libPaths := resolveSonames(needed, rpaths)
-
-	// Dedupe using a map
+	queue := []string{binary}
+	processed := map[string]struct{}{}
 	finalMap := map[string]struct{}{}
-	if interpPath != "" {
-		finalMap[interpPath] = struct{}{}
-	}
-	for _, p := range libPaths {
-		finalMap[p] = struct{}{}
-	}
+
 	// Add /etc/ld.so.cache if present
 	if _, err := os.Stat("/etc/ld.so.cache"); err == nil {
 		finalMap["/etc/ld.so.cache"] = struct{}{}
+	}
+
+	for len(queue) > 0 {
+		// Dequeue
+		curr := queue[0]
+		queue = queue[1:]
+
+		if _, ok := processed[curr]; ok {
+			continue
+		}
+		processed[curr] = struct{}{}
+
+		f, err := elf.Open(curr)
+		if err != nil {
+			// This can happen with non-ELF files in the dependency chain
+			// (e.g. ld.so.cache). Ignore them.
+			continue
+		}
+		defer f.Close()
+
+		// The first binary in the queue is the main one; grab its interpreter
+		if curr == binary {
+			if interpPath := parseInterp(f); interpPath != "" {
+				finalMap[interpPath] = struct{}{}
+				queue = append(queue, interpPath)
+			}
+		}
+
+		needed, rpaths := parseDynamic(f)
+		origin := filepath.Dir(curr)
+		rpaths = normalizeRpaths(rpaths, origin)
+		libPaths := resolveSonames(needed, rpaths)
+
+		for _, p := range libPaths {
+			if _, ok := finalMap[p]; !ok {
+				finalMap[p] = struct{}{}
+				queue = append(queue, p)
+			}
+		}
 	}
 
 	out := make([]string, 0, len(finalMap))
