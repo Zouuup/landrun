@@ -4,6 +4,8 @@
 KEEP_BINARY=false
 USE_SYSTEM_BINARY=false
 NO_BUILD=false
+# Whether we should try to do network calls during testing.
+INTERNET_ACCESS=true
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -17,6 +19,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         "--no-build")
             NO_BUILD=true
+            shift
+            ;;
+        "--offline")
+            INTERNET_ACCESS=false
             shift
             ;;
         *)
@@ -136,7 +142,7 @@ run_test() {
 # Test cases
 print_status "Starting test cases..."
 
-Basic access tests
+# Basic access tests
 run_test "Read-only access to file" \
     "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- cat $RO_DIR/test.txt" \
     0
@@ -179,7 +185,7 @@ run_test "Execute a file with --add-exec flag" \
     0
 
 run_test "Execute a file with --add-exec and --ldd flag" \
-    "./landrun --log-level debug --add-exec --ldd -- /usr/bin/true" \
+    "./landrun --log-level debug --add-exec --ldd -- $(which true)" \
     0
 
 
@@ -233,19 +239,19 @@ run_test "No configuration" \
 
 # Process creation and redirection tests
 run_test "Process creation with pipe" \
-    "./landrun --log-level debug --rox / -- bash -c 'ls /usr | grep bin'" \
+    "./landrun --log-level debug --rox / --env PATH -- bash -c 'ls /usr | grep bin'" \
     0
 
 run_test "File redirection" \
-    "./landrun --log-level debug --rox / --rw $RW_DIR -- bash -c 'ls /usr > $RW_DIR/output.txt && cat $RW_DIR/output.txt'" \
+    "./landrun --log-level debug --rox / --rw $RW_DIR --env PATH -- bash -c 'ls /usr > $RW_DIR/output.txt && cat $RW_DIR/output.txt'" \
     0
 
 # Network restrictions tests (if kernel supports it)
-run_test "TCP connection without permission" \
+$INTERNET_ACCESS && run_test "TCP connection without permission" \
     "./landrun --log-level debug --rox /usr --ro / -- curl -s --connect-timeout 2 https://example.com" \
     7
 
-run_test "TCP connection with permission" \
+$INTERNET_ACCESS && run_test "TCP connection with permission" \
     "./landrun --log-level debug --rox /usr --ro / --connect-tcp 443 -- curl -s --connect-timeout 2 https://example.com" \
     0
 
@@ -260,32 +266,32 @@ run_test "Environment isolation (no variables should be passed)" \
     0
 
 run_test "Passing specific environment variable" \
-    "./landrun --log-level debug --rox /usr --ro / --env TEST_ENV_VAR -- bash -c 'echo \$TEST_ENV_VAR | grep \"test_value_123\"'" \
+    "./landrun --log-level debug --rox /usr --ro / --env TEST_ENV_VAR --env PATH -- bash -c 'echo \$TEST_ENV_VAR | grep \"test_value_123\"'" \
     0
 
 run_test "Passing custom environment variable" \
-    "./landrun --log-level debug --rox /usr --ro / --env CUSTOM_VAR=custom_value -- bash -c 'echo \$CUSTOM_VAR | grep \"custom_value\"'" \
+    "./landrun --log-level debug --rox /usr --ro / --env CUSTOM_VAR=custom_value --env PATH -- bash -c 'echo \$CUSTOM_VAR | grep \"custom_value\"'" \
     0
 
 # Combining different permission types
 run_test "Mixed permissions" \
-    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --rox $EXEC_DIR --rwx $RW_DIR -- bash -c '$EXEC_DIR/test.sh > $RW_DIR/output.txt && cat $RW_DIR/output.txt'" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --rox $EXEC_DIR --rwx $RW_DIR --env PATH -- bash -c '$EXEC_DIR/test.sh > $RW_DIR/output.txt && cat $RW_DIR/output.txt'" \
     0
 
 # Specific regression tests for bugs we fixed
 run_test "Root path traversal regression test" \
-    "./landrun --log-level debug --rox /usr -- /usr/bin/ls /usr" \
+    "./landrun --log-level debug --rox /usr -- $(which ls) /usr" \
     0
 
 run_test "Execute from read-only paths regression test" \
-    "./landrun --log-level debug --rox /usr --ro /usr/bin -- /usr/bin/id" \
+    "./landrun --log-level debug --rox /usr --ro /usr/bin -- $(which id)" \
     0
 
 run_test "Unrestricted filesystem access" \
     "./landrun --log-level debug --unrestricted-filesystem ls /usr" \
     0
 
-run_test "Unrestricted network access" \
+$INTERNET_ACCESS && run_test "Unrestricted network access" \
     "./landrun --log-level debug --unrestricted-network --rox /usr --ro /etc -- curl -s --connect-timeout 2 https://example.com" \
     0
 
@@ -293,7 +299,7 @@ run_test "Restricted filesystem access" \
     "./landrun --log-level debug ls /usr" \
     1
 
-run_test "Restricted network access" \
+$INTERNET_ACCESS && run_test "Restricted network access" \
     "./landrun --log-level debug --rox /usr --ro /etc -- curl -s --connect-timeout 2 https://example.com" \
     7
 
