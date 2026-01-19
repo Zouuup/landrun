@@ -62,6 +62,15 @@ maintained by [r1w1s1](https://github.com/r1w1s1)
 sudo sbopkg -i packagename
 ```
 
+#### Debian/Ubuntu
+
+Available in Ubuntu since `questing` / `resolute` (26.04 LTS), available in Debian since `forky`.
+
+```bash
+sudo apt install landrun
+```
+
+
 ## Usage
 
 Basic syntax:
