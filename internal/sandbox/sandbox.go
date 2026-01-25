@@ -172,18 +172,24 @@ func Apply(cfg Config) error {
 		return nil
 	}
 
-	// Apply all rules at once
+	// Apply all rules in a single Restrict() call.
+	// Using separate RestrictPaths() and RestrictNet() calls creates two
+	// Landlock rulesets. RestrictNet() clears handledAccessFS, and since
+	// REFER is "always denied by default when not in handled_access_fs"
+	// (per kernel docs), the second ruleset would implicitly deny REFER.
+	// Using Restrict() with combined rules avoids this issue.
 	log.Debug("Applying Landlock restrictions")
+	var allRules []landlock.Rule
 	if !cfg.UnrestrictedFilesystem {
-		err := llCfg.RestrictPaths(file_rules...)
-		if err != nil {
-			return fmt.Errorf("failed to apply Landlock filesystem restrictions: %w", err)
-		}
+		allRules = append(allRules, file_rules...)
 	}
 	if !cfg.UnrestrictedNetwork {
-		err := llCfg.RestrictNet(net_rules...)
+		allRules = append(allRules, net_rules...)
+	}
+	if len(allRules) > 0 {
+		err := llCfg.Restrict(allRules...)
 		if err != nil {
-			return fmt.Errorf("failed to apply Landlock network restrictions: %w", err)
+			return fmt.Errorf("failed to apply Landlock restrictions: %w", err)
 		}
 	}
 
