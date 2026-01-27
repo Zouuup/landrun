@@ -4,10 +4,11 @@ on: [push, pull_request]
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         go: ["1.22", "1.24", "stable"]
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     name: Go ${{ matrix.go }} build
     steps:
       - name: Checkout
