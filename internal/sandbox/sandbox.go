@@ -172,15 +172,32 @@ func Apply(cfg Config) error {
 		return nil
 	}
 
-	// Apply all rules at once
+	// Apply all rules in a single Landlock layer to avoid creating multiple layers. Each additional
+	// layer implicitly denies LANDLOCK_ACCESS_FS_REFER even when handledAccessFS is 0, which breaks
+	// hardlinking across directories.
+	//
+	// See <https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags> ):
+	// > “This is the only access right which is denied by default by any ruleset, even if the right
+	// > is not specified as handled at ruleset creation time. The only way to make a ruleset grant
+	// > this right is to explicitly allow it for a specific directory by adding a matching rule to
+	// > the ruleset.”
+	//
+	// When both FS and Net are restricted, we use `Restrict()` to keep everything in one layer. When
+	// only one is restricted, we can use `RestrictPaths()` or `RestrictNet()` which will completely
+	// allow the unrestricted one.
 	log.Debug("Applying Landlock restrictions")
-	if !cfg.UnrestrictedFilesystem {
+
+	if !cfg.UnrestrictedFilesystem && !cfg.UnrestrictedNetwork {
+		err := llCfg.Restrict(append(file_rules, net_rules...)...)
+		if err != nil {
+			return fmt.Errorf("failed to apply Landlock restrictions: %w", err)
+		}
+	} else if !cfg.UnrestrictedFilesystem {
 		err := llCfg.RestrictPaths(file_rules...)
 		if err != nil {
 			return fmt.Errorf("failed to apply Landlock filesystem restrictions: %w", err)
 		}
-	}
-	if !cfg.UnrestrictedNetwork {
+	} else if !cfg.UnrestrictedNetwork {
 		err := llCfg.RestrictNet(net_rules...)
 		if err != nil {
 			return fmt.Errorf("failed to apply Landlock network restrictions: %w", err)
