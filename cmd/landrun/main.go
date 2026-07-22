@@ -5,18 +5,20 @@ import (
 	osexec "os/exec"
 	"strings"
 
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 	"github.com/zouuup/landrun/internal/elfdeps"
 	"github.com/zouuup/landrun/internal/exec"
 	"github.com/zouuup/landrun/internal/log"
 	"github.com/zouuup/landrun/internal/sandbox"
+
+	"context"
 )
 
 // Version is the current version of landrun
 const Version = "0.1.15"
 
 func main() {
-	app := &cli.App{
+	app := &cli.Command{
 		Name:    "landrun",
 		Usage:   "Run a command in a Landlock sandbox",
 		Version: Version,
@@ -25,7 +27,7 @@ func main() {
 				Name:    "log-level",
 				Usage:   "Set logging level (error, info, debug)",
 				Value:   "error",
-				EnvVars: []string{"LANDRUN_LOG_LEVEL"},
+				Sources: cli.EnvVars("LANDRUN_LOG_LEVEL"),
 			},
 			&cli.StringSliceFlag{
 				Name:  "ro",
@@ -61,7 +63,6 @@ func main() {
 			&cli.StringSliceFlag{
 				Name:  "env",
 				Usage: "Environment variables to pass to the sandboxed command (KEY=VALUE or just KEY to pass current value)",
-				Value: cli.NewStringSlice(),
 			},
 			&cli.BoolFlag{
 				Name:  "unrestricted-filesystem",
@@ -84,11 +85,11 @@ func main() {
 				Value: false,
 			},
 		},
-		Before: func(c *cli.Context) error {
+		Before: func(ctx context.Context, c *cli.Command) (context.Context, error) {
 			log.SetLevel(c.String("log-level"))
-			return nil
+			return nil, nil
 		},
-		Action: func(c *cli.Context) error {
+		Action: func(ctx context.Context, c *cli.Command) error {
 			args := c.Args().Slice()
 			if len(args) == 0 {
 				log.Fatal("Missing command to run")
@@ -151,7 +152,7 @@ func main() {
 		},
 	}
 
-	if err := app.Run(os.Args); err != nil {
+	if err := app.Run(context.Background(), os.Args); err != nil {
 		log.Fatal("%v", err)
 	}
 }
