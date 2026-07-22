@@ -172,25 +172,41 @@ func Apply(cfg Config) error {
 		return nil
 	}
 
-	// Apply all rules in a single Restrict() call.
-	// Using separate RestrictPaths() and RestrictNet() calls creates two
-	// Landlock rulesets. RestrictNet() clears handledAccessFS, and since
-	// REFER is "always denied by default when not in handled_access_fs"
-	// (per kernel docs), the second ruleset would implicitly deny REFER.
-	// Using Restrict() with combined rules avoids this issue.
+	// Choose which go-landlock entry point to use:
+	// - RestrictPaths clears handledAccessNet, so network stays unrestricted.
+	// - RestrictNet clears handledAccessFS, so filesystem stays unrestricted.
+	// - Restrict keeps both domains handled. Prefer that when both are
+	//   restricted: separate RestrictPaths+RestrictNet stacks two rulesets,
+	//   and the second clears handledAccessFS, which implicitly denies REFER
+	//   ("always denied by default when not in handled_access_fs").
+	// V5.Restrict with only FS rules would still handle net and deny all TCP
+	// with no ConnectTCP/BindTCP allows — so unrestricted-network must use
+	// RestrictPaths, not Restrict.
 	log.Debug("Applying Landlock restrictions")
-	var allRules []landlock.Rule
-	if !cfg.UnrestrictedFilesystem {
-		allRules = append(allRules, file_rules...)
-	}
-	if !cfg.UnrestrictedNetwork {
-		allRules = append(allRules, net_rules...)
-	}
-	if len(allRules) > 0 {
-		err := llCfg.Restrict(allRules...)
-		if err != nil {
-			return fmt.Errorf("failed to apply Landlock restrictions: %w", err)
+	var err error
+	switch {
+	case cfg.UnrestrictedNetwork && !cfg.UnrestrictedFilesystem:
+		if len(file_rules) > 0 {
+			err = llCfg.RestrictPaths(file_rules...)
 		}
+	case cfg.UnrestrictedFilesystem && !cfg.UnrestrictedNetwork:
+		if len(net_rules) > 0 {
+			err = llCfg.RestrictNet(net_rules...)
+		}
+	default:
+		var allRules []landlock.Rule
+		if !cfg.UnrestrictedFilesystem {
+			allRules = append(allRules, file_rules...)
+		}
+		if !cfg.UnrestrictedNetwork {
+			allRules = append(allRules, net_rules...)
+		}
+		if len(allRules) > 0 {
+			err = llCfg.Restrict(allRules...)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("failed to apply Landlock restrictions: %w", err)
 	}
 
 	log.Info("Landlock restrictions applied successfully")
