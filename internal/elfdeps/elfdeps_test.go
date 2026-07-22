@@ -285,3 +285,183 @@ func TestResolveSonamesOriginExpansion(t *testing.T) {
 		t.Fatalf("expected %s, got %s", libPath, out2[0])
 	}
 }
+
+func TestLdconfigMachineTag(t *testing.T) {
+	tests := []struct {
+		class   elf.Class
+		machine elf.Machine
+		want    string
+	}{
+		{elf.ELFCLASS64, elf.EM_X86_64, "x86-64"},
+		{elf.ELFCLASS32, elf.EM_X86_64, "x32"},
+		{elf.ELFCLASS64, elf.EM_AARCH64, "AArch64"},
+		{elf.ELFCLASS32, elf.EM_ARM, "ARM"},
+		{elf.ELFCLASS32, elf.EM_386, ""},
+		{elf.ELFCLASS64, elf.EM_PPC64, "PPC64"},
+		{elf.ELFCLASS32, elf.EM_PPC, "PPC"},
+		{elf.ELFCLASS64, elf.EM_RISCV, "RISCV64"},
+		{elf.ELFCLASS32, elf.EM_RISCV, "RISCV32"},
+		{elf.ELFCLASS64, elf.EM_S390, "S390X"},
+		{elf.ELFCLASS32, elf.EM_S390, "S390"},
+		{elf.ELFCLASS64, elf.EM_IA_64, "IA-64"},
+		{elf.ELFCLASS64, elf.EM_SPARCV9, "SPARC64"},
+		{elf.ELFCLASS32, elf.EM_SPARC, "SPARC"},
+		{elf.ELFCLASS64, elf.EM_MIPS, "MIPS64"},
+		{elf.ELFCLASS32, elf.EM_MIPS, "MIPS"},
+		{elf.ELFCLASS64, elf.EM_NONE, ""},
+	}
+	for _, tc := range tests {
+		got := ldconfigMachineTag(tc.class, tc.machine)
+		if got != tc.want {
+			t.Fatalf("ldconfigMachineTag(%v,%v)=%q want %q", tc.class, tc.machine, got, tc.want)
+		}
+	}
+}
+
+func TestStandardLibDirs(t *testing.T) {
+	cases := []struct {
+		class   elf.Class
+		machine elf.Machine
+		needle  string
+	}{
+		{elf.ELFCLASS64, elf.EM_X86_64, "/lib/x86_64-linux-gnu"},
+		{elf.ELFCLASS32, elf.EM_X86_64, "/libx32"},
+		{elf.ELFCLASS32, elf.EM_386, "/lib/i386-linux-gnu"},
+		{elf.ELFCLASS64, elf.EM_AARCH64, "/lib/aarch64-linux-gnu"},
+		{elf.ELFCLASS32, elf.EM_ARM, "/lib/arm-linux-gnueabihf"},
+		{elf.ELFCLASS64, elf.EM_RISCV, "/lib/riscv64-linux-gnu"},
+		{elf.ELFCLASS64, elf.EM_PPC64, "/lib/powerpc64le-linux-gnu"},
+		{elf.ELFCLASS64, elf.EM_S390, "/lib/s390x-linux-gnu"},
+	}
+	for _, tc := range cases {
+		dirs := standardLibDirs(tc.class, tc.machine)
+		found := false
+		for _, d := range dirs {
+			if d == tc.needle {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("standardLibDirs(%v,%v) missing %s in %v", tc.class, tc.machine, tc.needle, dirs)
+		}
+		// Always includes generic fallbacks.
+		hasLib := false
+		for _, d := range dirs {
+			if d == "/lib" {
+				hasLib = true
+			}
+		}
+		if !hasLib {
+			t.Fatalf("expected /lib fallback in %v", dirs)
+		}
+	}
+}
+
+func TestTokenInInfoAndHasKnownMachineTag(t *testing.T) {
+	if !tokenInInfo("libc6,x86-64", "x86-64") {
+		t.Fatal("expected token match")
+	}
+	if tokenInInfo("libc6,x86-64", "x32") {
+		t.Fatal("unexpected token match")
+	}
+	if tokenInInfo("", "x86-64") {
+		t.Fatal("empty info should not match")
+	}
+	if tokenInInfo("libc6", "") {
+		t.Fatal("empty token should not match")
+	}
+	if !hasKnownMachineTag("libc6,x86-64") {
+		t.Fatal("expected known machine tag")
+	}
+	if hasKnownMachineTag("libc6") {
+		t.Fatal("plain libc6 should not have known machine tag")
+	}
+}
+
+func TestPickLdEntry(t *testing.T) {
+	if pickLdEntry(nil, "x86-64") != "" {
+		t.Fatal("empty entries should return empty")
+	}
+
+	entries := []ldEntry{
+		{path: "/lib/x32.so", info: "libc6,x32"},
+		{path: "/lib/x64.so", info: "libc6,x86-64"},
+	}
+	if got := pickLdEntry(entries, "x86-64"); got != "/lib/x64.so" {
+		t.Fatalf("preferred tag: got %s", got)
+	}
+
+	// No preferred tag: prefer entry without known machine qualifier.
+	plain := []ldEntry{
+		{path: "/lib/wrong.so", info: "libc6,x86-64"},
+		{path: "/lib/plain.so", info: "libc6"},
+	}
+	if got := pickLdEntry(plain, ""); got != "/lib/plain.so" {
+		t.Fatalf("no preferred tag: got %s", got)
+	}
+
+	// Preferred miss with multiple candidates → empty (avoid wrong arch).
+	if got := pickLdEntry(entries, "AArch64"); got != "" {
+		t.Fatalf("preferred miss with multiple should be empty, got %s", got)
+	}
+
+	// Preferred miss with single candidate → that one.
+	single := []ldEntry{{path: "/lib/only.so", info: "libc6,x32"}}
+	if got := pickLdEntry(single, "x86-64"); got != "/lib/only.so" {
+		t.Fatalf("single fallback: got %s", got)
+	}
+}
+
+func TestNormalizeRpathsOriginBraceAndEmpty(t *testing.T) {
+	origin := "/opt/app"
+	got := normalizeRpaths([]string{"", "${ORIGIN}/lib", "$ORIGIN/../lib"}, origin)
+	want := []string{"/opt/app/lib", "/opt/app/../lib"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("index %d: got %s want %s", i, got[i], want[i])
+		}
+	}
+}
+
+func TestGetLdmapErrorAndMalformed(t *testing.T) {
+	original := ldconfigRunner
+	defer func() { ldconfigRunner = original }()
+
+	ldconfigRunner = func() ([]byte, error) {
+		return nil, os.ErrPermission
+	}
+	if m := getLdmap("x86-64"); len(m) != 0 {
+		t.Fatalf("expected empty map on error, got %v", m)
+	}
+
+	tmpDir := t.TempDir()
+	okPath := filepath.Join(tmpDir, "libok.so")
+	f, err := os.Create(okPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	ldconfigRunner = func() ([]byte, error) {
+		return []byte(
+			"not a mapping line\n" +
+				"libbad.so (libc6,x86-64)\n" + // missing =>
+				"libok.so (libc6,x86-64) => " + okPath + "\n" +
+				"libmissing.so (libc6,x86-64) => /no/such/libmissing.so\n",
+		), nil
+	}
+	m := getLdmap("x86-64")
+	if got := m["libok.so"]; got != okPath {
+		t.Fatalf("expected libok.so -> %s, got %s map=%v", okPath, got, m)
+	}
+	if _, ok := m["libmissing.so"]; ok {
+		t.Fatal("missing path should not be in map")
+	}
+	if _, ok := m["libbad.so"]; ok {
+		t.Fatal("malformed line should not be in map")
+	}
+}

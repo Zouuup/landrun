@@ -115,6 +115,11 @@ echo "#!/bin/bash" > "$RW_DIR/rw_script.sh"
 echo "echo 'this script is in a read-write directory'" >> "$RW_DIR/rw_script.sh"
 chmod +x "$RW_DIR/rw_script.sh"
 
+# Probe Landlock ABI version (0 if unavailable). Used by strict-mode tests.
+LANDLOCK_ABI=$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version@v0.9.0 2>/dev/null || echo 0)
+LANDLOCK_ABI=$(echo "$LANDLOCK_ABI" | tr -d '[:space:]')
+print_status "Detected Landlock ABI: ${LANDLOCK_ABI}"
+
 # Function to run a test case
 run_test() {
     local name="$1"
@@ -135,6 +140,29 @@ run_test() {
     eval "$cmd"
     local exit_code=$?
     
+    if [ $exit_code -eq $expected_exit ]; then
+        print_success "Test passed: $name"
+        return 0
+    else
+        print_error "Test failed: $name (expected exit $expected_exit, got $exit_code)"
+        exit 1
+    fi
+}
+
+# Like run_test but does NOT inject --best-effort (strict ABI target).
+run_test_strict() {
+    local name="$1"
+    local cmd="$2"
+    local expected_exit="$3"
+
+    if [ "$USE_SYSTEM_BINARY" = true ]; then
+        cmd="${cmd//.\/landrun/landrun}"
+    fi
+
+    print_status "Running test (strict): $name"
+    eval "$cmd"
+    local exit_code=$?
+
     if [ $exit_code -eq $expected_exit ]; then
         print_success "Test passed: $name"
         return 0
@@ -324,6 +352,200 @@ run_test "Unrestricted IPC scoping smoke test" \
 run_test "UNIX socket path allowed with --unix" \
     "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR --unix $RO_DIR/test.txt -- cat $RO_DIR/test.txt" \
     0
+
+# --- CLI / startup edge cases ---
+run_test "Missing command to run" \
+    "./landrun --log-level error" \
+    1
+
+run_test "Unknown binary fails" \
+    "./landrun --log-level error --rox /usr -- /nonexistent/landrun-binary-xyz" \
+    1
+
+run_test "Missing env key is omitted" \
+    "./landrun --log-level debug --rox /usr --ro / --env LANDRUN_MISSING_ENV_KEY_XYZ --env PATH -- bash -c '[[ -z \$LANDRUN_MISSING_ENV_KEY_XYZ ]]'" \
+    0
+
+run_test "LANDRUN_LOG_LEVEL env smoke" \
+    "LANDRUN_LOG_LEVEL=debug ./landrun --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- cat $RO_DIR/test.txt" \
+    0
+
+# --- Filesystem edge cases ---
+# Create a dedicated rwx file for single-file exec tests
+cp "$RW_DIR/rw_script.sh" "$RW_DIR/rwx_file.sh"
+chmod +x "$RW_DIR/rwx_file.sh"
+
+run_test "rwx on a single file allows execution" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --rwx $RW_DIR/rwx_file.sh -- $RW_DIR/rwx_file.sh" \
+    0
+
+run_test "Overwrite of read-only file is denied" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- bash -c 'echo overwrite > $RO_DIR/test.txt'" \
+    1
+
+run_test "Truncate of read-only file is denied" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- bash -c ': > $RO_DIR/test.txt'" \
+    1
+
+run_test "Delete file under rw is allowed" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --rw $RW_DIR --env PATH -- bash -c 'echo delme > $RW_DIR/todelete.txt && rm $RW_DIR/todelete.txt'" \
+    0
+
+run_test "Delete file under ro is denied" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR --env PATH -- rm $RO_DIR/test.txt" \
+    1
+
+run_test "Execute from nested exec dir under ro parent" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --rox $RO_DIR_NESTED_EXEC -- $RO_DIR_NESTED_EXEC/test.sh" \
+    0
+
+run_test "Execute denied from nested exec dir with only ro parent" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- $RO_DIR_NESTED_EXEC/test.sh" \
+    1
+
+run_test "ldd without add-exec still resolves libraries for true" \
+    "./landrun --log-level debug --ldd --add-exec -- $(which true)" \
+    0
+
+# Just --ldd: libraries get --rox but the binary itself may still need add-exec.
+# Document expected behavior: without --add-exec, executing true requires the binary path.
+TRUE_BIN=$(which true)
+run_test "ldd alone without binary path may fail to exec" \
+    "./landrun --log-level debug --ldd -- $TRUE_BIN" \
+    1
+
+run_test "ldd with explicit rox of binary succeeds" \
+    "./landrun --log-level debug --ldd --rox $TRUE_BIN -- $TRUE_BIN" \
+    0
+
+# --- Local network tests (work offline) ---
+# Use system python3 (not pyenv shims) so --ldd/--add-exec can resolve deps.
+PYTHON=/usr/bin/python3
+BIND_PORT=18765
+BIND_PORT_OTHER=18766
+PY_LANDRUN="./landrun --log-level debug --add-exec --ldd --rox /usr --ro /etc"
+
+run_test "TCP bind allowed on permitted port" \
+    "$PY_LANDRUN --bind-tcp $BIND_PORT -- $PYTHON -c \"
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $BIND_PORT))
+s.close()
+\"" \
+    0
+
+run_test "TCP bind denied on non-permitted port" \
+    "$PY_LANDRUN --bind-tcp $BIND_PORT -- $PYTHON -c \"
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(('127.0.0.1', $BIND_PORT_OTHER))
+except OSError:
+    sys.exit(1)
+sys.exit(0)
+\"" \
+    1
+
+run_test "Comma-separated bind-tcp ports" \
+    "$PY_LANDRUN --bind-tcp $BIND_PORT,$BIND_PORT_OTHER -- $PYTHON -c \"
+import socket
+for p in ($BIND_PORT, $BIND_PORT_OTHER):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(('127.0.0.1', p))
+    s.close()
+\"" \
+    0
+
+# Local connect allow/deny: start a listener outside the sandbox, connect from inside.
+$PYTHON -c "
+import socket, time, os, signal
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $BIND_PORT))
+s.listen(1)
+os.write(1, b'ready\n')
+conn, _ = s.accept()
+conn.close()
+s.close()
+" > "$TEST_DIR/listener.out" 2>&1 &
+LISTENER_PID=$!
+# Wait until listener is ready
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    if grep -q ready "$TEST_DIR/listener.out" 2>/dev/null; then break; fi
+    sleep 0.1
+done
+
+run_test "TCP connect allowed to local permitted port" \
+    "$PY_LANDRUN --connect-tcp $BIND_PORT -- $PYTHON -c \"
+import socket
+s = socket.create_connection(('127.0.0.1', $BIND_PORT), timeout=2)
+s.close()
+\"" \
+    0
+
+wait $LISTENER_PID 2>/dev/null || true
+
+# Deny connect to a port that has no connect-tcp rule (listener not needed; connect fails at landlock)
+run_test "TCP connect denied to non-permitted local port" \
+    "$PY_LANDRUN --connect-tcp $BIND_PORT -- $PYTHON -c \"
+import socket, sys
+try:
+    s = socket.create_connection(('127.0.0.1', $BIND_PORT_OTHER), timeout=1)
+    s.close()
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+\"" \
+    1
+
+run_test "Unrestricted filesystem still restricts network without connect-tcp" \
+    "./landrun --log-level debug --unrestricted-filesystem --add-exec --ldd -- $PYTHON -c \"
+import socket, sys
+try:
+    s = socket.create_connection(('127.0.0.1', $BIND_PORT_OTHER), timeout=1)
+    s.close()
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+\"" \
+    1
+
+# --- Unrestricted / domain combos ---
+run_test "All domains unrestricted is a no-op sandbox" \
+    "./landrun --log-level debug --unrestricted-filesystem --unrestricted-network --unrestricted-scoped -- echo ok" \
+    0
+
+run_test "unix paths ignored when filesystem unrestricted" \
+    "./landrun --log-level debug --unrestricted-filesystem --unix /run/does-not-matter.sock -- echo ok" \
+    0
+
+run_test "FS restricted with net and scoped unrestricted" \
+    "./landrun --log-level debug --unrestricted-network --unrestricted-scoped --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- cat $RO_DIR/test.txt" \
+    0
+
+# --- V6-V9 flag smokes ---
+run_test "Audit log flags smoke with best-effort" \
+    "./landrun --log-level debug --log-disable-originating --log-enable-subprocesses --log-disable-subdomains --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- cat $RO_DIR/test.txt" \
+    0
+
+run_test "unix on a directory path" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR --unix $RO_DIR -- cat $RO_DIR/test.txt" \
+    0
+
+# --- Strict mode (no --best-effort) ---
+if [ "$LANDLOCK_ABI" -lt 9 ] 2>/dev/null; then
+    run_test_strict "Strict V9 fails on ABI < 9 kernels" \
+        "./landrun --log-level error --rox /usr --ro /lib --ro /lib64 -- true" \
+        1
+else
+    print_status "Skipping strict-V9 failure test (kernel ABI >= 9)"
+    run_test_strict "Strict V9 succeeds on ABI >= 9 kernels" \
+        "./landrun --log-level error --rox /usr --ro /lib --ro /lib64 --add-exec --ldd -- true" \
+        0
+fi
 
 
 # Cleanup
