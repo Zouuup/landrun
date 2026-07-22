@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,7 +34,7 @@ func TestParseAndResolveTrue(t *testing.T) {
 
 	origin := filepath.Dir(bin)
 	rpaths = normalizeRpaths(rpaths, origin)
-	paths := resolveSonames(needed, rpaths)
+	paths := resolveSonames(needed, rpaths, f.Class, f.Machine)
 	if paths == nil {
 		paths = []string{}
 	}
@@ -43,11 +44,22 @@ func TestParseAndResolveTrue(t *testing.T) {
 		t.Fatalf("interp path %s does not exist: %v", interp, err)
 	}
 
-	// If there are resolved library paths, they must exist
+	// If there are resolved library paths, they must exist and match the
+	// binary's architecture (not e.g. an x32 libc for an x86-64 binary).
 	for _, p := range paths {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("resolved library path %s does not exist: %v", p, err)
 		}
+		lib, err := elf.Open(p)
+		if err != nil {
+			continue
+		}
+		if lib.Class != f.Class || lib.Machine != f.Machine {
+			lib.Close()
+			t.Fatalf("resolved %s has class/machine %v/%v, want %v/%v",
+				p, lib.Class, lib.Machine, f.Class, f.Machine)
+		}
+		lib.Close()
 	}
 }
 
@@ -112,6 +124,13 @@ func TestGetLibraryDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to find 'true' binary: %v", err)
 	}
+	f, err := elf.Open(bin)
+	if err != nil {
+		t.Fatalf("failed to open %s: %v", bin, err)
+	}
+	class, machine := f.Class, f.Machine
+	f.Close()
+
 	paths, err := GetLibraryDependencies(bin)
 	if err != nil {
 		t.Fatalf("GetLibraryDependencies failed: %v", err)
@@ -119,13 +138,25 @@ func TestGetLibraryDependencies(t *testing.T) {
 	if len(paths) == 0 {
 		t.Fatalf("expected non-empty dependency list for %s", bin)
 	}
-	// ensure returned paths are absolute and exist
+	// ensure returned paths are absolute, exist, and match the binary arch
 	for _, p := range paths {
 		if !filepath.IsAbs(p) {
 			t.Fatalf("expected absolute path, got %s", p)
 		}
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("path %s does not exist: %v", p, err)
+		}
+		if strings.Contains(p, "libx32") && class == elf.ELFCLASS64 {
+			t.Fatalf("x86-64 binary resolved to x32 path %s", p)
+		}
+		lib, err := elf.Open(p)
+		if err != nil {
+			continue // e.g. ld.so.cache
+		}
+		mismatched := lib.Class != class || lib.Machine != machine
+		lib.Close()
+		if mismatched {
+			t.Fatalf("dependency %s does not match binary arch", p)
 		}
 	}
 }
@@ -149,11 +180,45 @@ func TestGetLdmapWithFakeOutput(t *testing.T) {
 		return []byte("libfake.so (libc6,x86-64) => " + tmp + "\n"), nil
 	}
 
-	m := getLdmap()
+	m := getLdmap("x86-64")
 	if got, ok := m["libfake.so"]; !ok {
 		t.Fatalf("expected libfake.so in map")
 	} else if got != tmp {
 		t.Fatalf("expected path %s, got %s", tmp, got)
+	}
+}
+
+func TestGetLdmapPrefersMatchingArch(t *testing.T) {
+	original := ldconfigRunner
+	defer func() { ldconfigRunner = original }()
+
+	tmpDir := t.TempDir()
+	x32Path := filepath.Join(tmpDir, "libc-x32.so.6")
+	x64Path := filepath.Join(tmpDir, "libc-x64.so.6")
+	for _, p := range []string{x32Path, x64Path} {
+		f, err := os.Create(p)
+		if err != nil {
+			t.Fatalf("failed to create %s: %v", p, err)
+		}
+		f.Close()
+	}
+
+	// x32 listed first — the old bug picked this for every arch.
+	ldconfigRunner = func() ([]byte, error) {
+		return []byte(
+			"libc.so.6 (libc6,x32) => " + x32Path + "\n" +
+				"libc.so.6 (libc6,x86-64) => " + x64Path + "\n",
+		), nil
+	}
+
+	m := getLdmap("x86-64")
+	if got := m["libc.so.6"]; got != x64Path {
+		t.Fatalf("expected x86-64 libc %s, got %s", x64Path, got)
+	}
+
+	m = getLdmap("x32")
+	if got := m["libc.so.6"]; got != x32Path {
+		t.Fatalf("expected x32 libc %s, got %s", x32Path, got)
 	}
 }
 
@@ -175,7 +240,7 @@ func TestResolveSonamesUsesLdmapFallback(t *testing.T) {
 
 	// needed contains a soname that won't be found in rpaths or std dirs
 	rpaths := normalizeRpaths([]string{}, tmpDir)
-	out := resolveSonames([]string{"libfake2.so"}, rpaths)
+	out := resolveSonames([]string{"libfake2.so"}, rpaths, elf.ELFCLASS64, elf.EM_X86_64)
 	if len(out) != 1 {
 		t.Fatalf("expected 1 resolved path, got %d", len(out))
 	}
@@ -202,7 +267,7 @@ func TestResolveSonamesOriginExpansion(t *testing.T) {
 
 	// rpath using $ORIGIN should resolve to tmpDir/lib
 	rpaths1 := normalizeRpaths([]string{"$ORIGIN/lib"}, tmpDir)
-	out := resolveSonames([]string{libName}, rpaths1)
+	out := resolveSonames([]string{libName}, rpaths1, elf.ELFCLASS64, elf.EM_X86_64)
 	if len(out) != 1 {
 		t.Fatalf("expected 1 resolved path for $ORIGIN, got %d", len(out))
 	}
@@ -212,7 +277,7 @@ func TestResolveSonamesOriginExpansion(t *testing.T) {
 
 	// relative rpath should also resolve against origin
 	rpaths2 := normalizeRpaths([]string{"lib"}, tmpDir)
-	out2 := resolveSonames([]string{libName}, rpaths2)
+	out2 := resolveSonames([]string{libName}, rpaths2, elf.ELFCLASS64, elf.EM_X86_64)
 	if len(out2) != 1 {
 		t.Fatalf("expected 1 resolved path for relative rpath, got %d", len(out2))
 	}
