@@ -292,7 +292,7 @@ run_test "Unrestricted filesystem access" \
     0
 
 $INTERNET_ACCESS && run_test "Unrestricted network access" \
-    "./landrun --log-level debug --unrestricted-network --rox /usr --ro /etc -- curl -s --connect-timeout 2 https://example.com" \
+    "./landrun --log-level debug --unrestricted-network --rox / -- curl -s --connect-timeout 2 http://kernel.org" \
     0
 
 run_test "Restricted filesystem access" \
@@ -300,7 +300,7 @@ run_test "Restricted filesystem access" \
     1
 
 $INTERNET_ACCESS && run_test "Restricted network access" \
-    "./landrun --log-level debug --rox /usr --ro /etc -- curl -s --connect-timeout 2 https://example.com" \
+    "./landrun --log-level debug --rox / -- curl -s --connect-timeout 2 http://kernel.org" \
     7
 
 
