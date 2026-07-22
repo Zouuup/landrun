@@ -16,6 +16,10 @@ var ldconfigRunner = func() ([]byte, error) {
 	return osexec.Command("ldconfig", "-p").Output()
 }
 
+// are we running a 64 bit binary? this is used when choosing the order
+// of library paths to look in (/lib vs /lib64)
+var is64bit bool
+
 // getLdmap runs `ldconfig -p` and returns a map of soname -> path.
 func getLdmap() map[string]string {
 	m := map[string]string{}
@@ -152,7 +156,10 @@ func resolveSingleSoname(soname string, rpaths []string, stdDirs []string, ldmap
 // standard library directories and falling back to parsing `ldconfig -p` output.
 func resolveSonames(needed []string, rpaths []string) []string {
 	resolved := map[string]string{}
-	stdDirs := []string{"/lib", "/lib64", "/usr/lib", "/usr/lib64", "/usr/local/lib"}
+	stdDirs := []string{"/lib", "/usr/lib", "/usr/local/lib"}
+	if is64bit {
+		stdDirs = append([]string{"/lib64", "/usr/lib64"}, stdDirs...)
+	}
 	var ldmap map[string]string
 
 	for _, soname := range needed {
@@ -206,6 +213,8 @@ func GetLibraryDependencies(binary string) ([]string, error) {
 				finalMap[interpPath] = struct{}{}
 				queue = append(queue, interpPath)
 			}
+			// also check if it is 64 or 32 bit
+			is64bit = f.Class == elf.ELFCLASS64
 		}
 
 		needed, rpaths := parseDynamic(f)
