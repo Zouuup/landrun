@@ -125,7 +125,12 @@ run_test() {
     if [ "$USE_SYSTEM_BINARY" = true ]; then
         cmd="${cmd//.\/landrun/landrun}"
     fi
-    
+
+    # The default target is Landlock ABI v9. Inject --best-effort so the suite
+    # gracefully degrades and runs on kernels below v9. This only affects which
+    # ABI level is targeted; the allow/deny semantics being tested are unchanged.
+    cmd="${cmd/landrun /landrun --best-effort }"
+
     print_status "Running test: $name"
     eval "$cmd"
     local exit_code=$?
@@ -302,6 +307,23 @@ run_test "Restricted filesystem access" \
 $INTERNET_ACCESS && run_test "Restricted network access" \
     "./landrun --log-level debug --rox / -- curl -s --connect-timeout 2 http://kernel.org" \
     7
+
+# New feature tests (Landlock V6-V9 / go-landlock v0.9.0)
+run_test "Ignore missing path with --ignore-missing" \
+    "./landrun --log-level debug --ignore-missing --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR --ro /nonexistent/path -- cat $RO_DIR/test.txt" \
+    0
+
+run_test "Missing path without --ignore-missing still fails" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --ro /nonexistent/path -- cat $RO_DIR/test.txt" \
+    1
+
+run_test "Unrestricted IPC scoping smoke test" \
+    "./landrun --log-level debug --unrestricted-scoped --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- cat $RO_DIR/test.txt" \
+    0
+
+run_test "UNIX socket path allowed with --unix" \
+    "./landrun --log-level debug --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR --unix $RO_DIR/test.txt -- cat $RO_DIR/test.txt" \
+    0
 
 
 # Cleanup

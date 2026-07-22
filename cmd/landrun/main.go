@@ -15,7 +15,7 @@ import (
 )
 
 // Version is the current version of landrun
-const Version = "0.1.16"
+const Version = "0.1.17"
 
 func main() {
 	app := &cli.Command{
@@ -45,6 +45,10 @@ func main() {
 				Name:  "rwx",
 				Usage: "Allow read-write access with execution to this path",
 			},
+			&cli.StringSliceFlag{
+				Name:  "unix",
+				Usage: "Allow connect(2)/sendmsg(2) on this pathname UNIX domain socket (Landlock ABI v9+)",
+			},
 			&cli.IntSliceFlag{
 				Name:   "bind-tcp",
 				Usage:  "Allow binding to these TCP ports",
@@ -72,6 +76,31 @@ func main() {
 			&cli.BoolFlag{
 				Name:  "unrestricted-network",
 				Usage: "Allow unrestricted network access",
+				Value: false,
+			},
+			&cli.BoolFlag{
+				Name:  "unrestricted-scoped",
+				Usage: "Allow unrestricted IPC scoping (do not restrict abstract UNIX sockets and signals; Landlock ABI v6+)",
+				Value: false,
+			},
+			&cli.BoolFlag{
+				Name:  "ignore-missing",
+				Usage: "Gracefully ignore paths that do not exist instead of failing",
+				Value: false,
+			},
+			&cli.BoolFlag{
+				Name:  "log-disable-originating",
+				Usage: "Disable audit logging of denials from the originating process (Landlock ABI v7+)",
+				Value: false,
+			},
+			&cli.BoolFlag{
+				Name:  "log-enable-subprocesses",
+				Usage: "Enable audit logging of denials after execve(2) in subprocesses (Landlock ABI v7+)",
+				Value: false,
+			},
+			&cli.BoolFlag{
+				Name:  "log-disable-subdomains",
+				Usage: "Disable audit logging of denials from nested Landlock domains (Landlock ABI v7+)",
 				Value: false,
 			},
 			&cli.BoolFlag{
@@ -134,11 +163,17 @@ func main() {
 				ReadWritePaths:           readWritePaths,
 				ReadOnlyExecutablePaths:  readOnlyExecutablePaths,
 				ReadWriteExecutablePaths: readWriteExecutablePaths,
+				UnixSocketPaths:          c.StringSlice("unix"),
 				BindTCPPorts:             c.IntSlice("bind-tcp"),
 				ConnectTCPPorts:          c.IntSlice("connect-tcp"),
 				BestEffort:               c.Bool("best-effort"),
 				UnrestrictedFilesystem:   c.Bool("unrestricted-filesystem"),
 				UnrestrictedNetwork:      c.Bool("unrestricted-network"),
+				UnrestrictedScoped:       c.Bool("unrestricted-scoped"),
+				IgnoreMissingPaths:       c.Bool("ignore-missing"),
+				DisableLogOriginating:    c.Bool("log-disable-originating"),
+				EnableLogSubprocesses:    c.Bool("log-enable-subprocesses"),
+				DisableLogSubdomains:     c.Bool("log-disable-subdomains"),
 			}
 
 			// Process environment variables

@@ -14,12 +14,54 @@ type Config struct {
 	ReadWritePaths           []string
 	ReadOnlyExecutablePaths  []string
 	ReadWriteExecutablePaths []string
+	UnixSocketPaths          []string
 	BindTCPPorts             []int
 	ConnectTCPPorts          []int
 	BestEffort               bool
 	UnrestrictedFilesystem   bool
 	UnrestrictedNetwork      bool
+	UnrestrictedScoped       bool
+	IgnoreMissingPaths       bool
+	// Audit logging configuration (Landlock ABI V7+).
+	DisableLogOriginating bool
+	EnableLogSubprocesses bool
+	DisableLogSubdomains  bool
 }
+
+// fullFSAccess is the union of every filesystem access right supported by
+// Landlock V9. It is used as the Config's handled access set so that every
+// per-path rule we build stays within its bounds.
+const fullFSAccess = landlock.AccessFSSet(
+	syscall.AccessFSExecute |
+		syscall.AccessFSWriteFile |
+		syscall.AccessFSReadFile |
+		syscall.AccessFSReadDir |
+		syscall.AccessFSRemoveDir |
+		syscall.AccessFSRemoveFile |
+		syscall.AccessFSMakeChar |
+		syscall.AccessFSMakeDir |
+		syscall.AccessFSMakeReg |
+		syscall.AccessFSMakeSock |
+		syscall.AccessFSMakeFifo |
+		syscall.AccessFSMakeBlock |
+		syscall.AccessFSMakeSym |
+		syscall.AccessFSRefer |
+		syscall.AccessFSTruncate |
+		syscall.AccessFSIoctlDev |
+		syscall.AccessFSResolveUnix,
+)
+
+// fullNetAccess is the union of every network access right supported by
+// Landlock V9 (available since V4).
+const fullNetAccess = landlock.AccessNetSet(
+	syscall.AccessNetBindTCP | syscall.AccessNetConnectTCP,
+)
+
+// fullScoped is the union of every IPC scope supported by Landlock V9
+// (available since V6).
+const fullScoped = landlock.ScopedSet(
+	syscall.ScopeAbstractUnixSocket | syscall.ScopeSignal,
+)
 
 // getReadWriteExecutableRights returns a full set of permissions including execution
 func getReadWriteExecutableRights(dir bool) landlock.AccessFSSet {
@@ -91,6 +133,18 @@ func getReadWriteRights(dir bool) landlock.AccessFSSet {
 	return accessRights
 }
 
+// getUnixSocketRights returns permissions for connecting to a pathname UNIX
+// domain socket (connect(2)/sendmsg(2)), available since Landlock ABI V9.
+func getUnixSocketRights(dir bool) landlock.AccessFSSet {
+	accessRights := landlock.AccessFSSet(0)
+	accessRights |= landlock.AccessFSSet(syscall.AccessFSReadFile)
+	accessRights |= landlock.AccessFSSet(syscall.AccessFSResolveUnix)
+	if dir {
+		accessRights |= landlock.AccessFSSet(syscall.AccessFSReadDir)
+	}
+	return accessRights
+}
+
 // isDirectory checks if the given path is a directory
 func isDirectory(path string) bool {
 	fileInfo, err := os.Stat(path)
@@ -100,112 +154,129 @@ func isDirectory(path string) bool {
 	return fileInfo.IsDir()
 }
 
+// pathRule builds a filesystem rule for the given access rights and path,
+// optionally applying the IgnoreIfMissing modifier so that referencing a
+// non-existing path does not lead to a runtime error.
+func pathRule(rights landlock.AccessFSSet, path string, ignoreMissing bool) landlock.Rule {
+	rule := landlock.PathAccess(rights, path)
+	if ignoreMissing {
+		return rule.IgnoreIfMissing()
+	}
+	return rule
+}
+
 func Apply(cfg Config) error {
 	log.Info("Sandbox config: %+v", cfg)
-
-	// Get the most advanced Landlock version available
-	llCfg := landlock.V5
-	if cfg.BestEffort {
-		llCfg = llCfg.BestEffort()
-	}
-
-	// Collect our rules
-	var file_rules []landlock.Rule
-	var net_rules []landlock.Rule
-
-	// Process executable paths
-	for _, path := range cfg.ReadOnlyExecutablePaths {
-		log.Debug("Adding read-only executable path: %s", path)
-		file_rules = append(file_rules, landlock.PathAccess(getReadOnlyExecutableRights(isDirectory(path)), path))
-	}
-
-	for _, path := range cfg.ReadWriteExecutablePaths {
-		log.Debug("Adding read-write executable path: %s", path)
-		file_rules = append(file_rules, landlock.PathAccess(getReadWriteExecutableRights(isDirectory(path)), path))
-	}
-
-	// Process read-only paths
-	for _, path := range cfg.ReadOnlyPaths {
-		log.Debug("Adding read-only path: %s", path)
-		file_rules = append(file_rules, landlock.PathAccess(getReadOnlyRights(isDirectory(path)), path))
-	}
-
-	// Process read-write paths
-	for _, path := range cfg.ReadWritePaths {
-		log.Debug("Adding read-write path: %s", path)
-		file_rules = append(file_rules, landlock.PathAccess(getReadWriteRights(isDirectory(path)), path))
-	}
-
-	// Add rules for TCP port binding
-	for _, port := range cfg.BindTCPPorts {
-		log.Debug("Adding TCP bind port: %d", port)
-		net_rules = append(net_rules, landlock.BindTCP(uint16(port)))
-	}
-
-	// Add rules for TCP connections
-	for _, port := range cfg.ConnectTCPPorts {
-		log.Debug("Adding TCP connect port: %d", port)
-		net_rules = append(net_rules, landlock.ConnectTCP(uint16(port)))
-	}
-
-	if cfg.UnrestrictedFilesystem && cfg.UnrestrictedNetwork {
-		log.Info("Unrestricted filesystem and network access enabled; no rules applied.")
-		return nil
-	}
 
 	if cfg.UnrestrictedFilesystem {
 		log.Info("Unrestricted filesystem access enabled.")
 	}
-
 	if cfg.UnrestrictedNetwork {
-		log.Info("Unrestricted network access enabled")
+		log.Info("Unrestricted network access enabled.")
+	}
+	if cfg.UnrestrictedScoped {
+		log.Info("Unrestricted IPC scoping enabled.")
 	}
 
-	// If we have no rules, just return
-	if len(file_rules) == 0 && len(net_rules) == 0 && !cfg.UnrestrictedFilesystem && !cfg.UnrestrictedNetwork {
-		log.Error("No rules provided, applying default restrictive rules, this will restrict anything landlock can do.")
-		err := llCfg.Restrict()
-		if err != nil {
-			return fmt.Errorf("failed to apply default Landlock restrictions: %w", err)
-		}
-		log.Info("Default restrictive Landlock rules applied successfully")
+	// Determine which access domains should be handled (i.e. restricted).
+	// A domain that is left out of the Config stays completely unrestricted.
+	var configArgs []interface{}
+	if !cfg.UnrestrictedFilesystem {
+		configArgs = append(configArgs, fullFSAccess)
+	}
+	if !cfg.UnrestrictedNetwork {
+		configArgs = append(configArgs, fullNetAccess)
+	}
+	if !cfg.UnrestrictedScoped {
+		configArgs = append(configArgs, fullScoped)
+	}
+
+	// If every domain is unrestricted, there is nothing for Landlock to do.
+	if len(configArgs) == 0 {
+		log.Info("Unrestricted filesystem, network and IPC scoping enabled; no rules applied.")
 		return nil
 	}
 
-	// Choose which go-landlock entry point to use:
-	// - RestrictPaths clears handledAccessNet, so network stays unrestricted.
-	// - RestrictNet clears handledAccessFS, so filesystem stays unrestricted.
-	// - Restrict keeps both domains handled. Prefer that when both are
-	//   restricted: separate RestrictPaths+RestrictNet stacks two rulesets,
-	//   and the second clears handledAccessFS, which implicitly denies REFER
-	//   ("always denied by default when not in handled_access_fs").
-	// V5.Restrict with only FS rules would still handle net and deny all TCP
-	// with no ConnectTCP/BindTCP allows — so unrestricted-network must use
-	// RestrictPaths, not Restrict.
-	log.Debug("Applying Landlock restrictions")
-	var err error
-	switch {
-	case cfg.UnrestrictedNetwork && !cfg.UnrestrictedFilesystem:
-		if len(file_rules) > 0 {
-			err = llCfg.RestrictPaths(file_rules...)
+	// Collect our rules. Filesystem rules are only meaningful when the
+	// filesystem domain is handled; network rules only when the network
+	// domain is handled. Adding a rule for an unhandled domain is rejected
+	// by Landlock with EINVAL.
+	var allRules []landlock.Rule
+
+	if !cfg.UnrestrictedFilesystem {
+		for _, path := range cfg.ReadOnlyExecutablePaths {
+			log.Debug("Adding read-only executable path: %s", path)
+			allRules = append(allRules, pathRule(getReadOnlyExecutableRights(isDirectory(path)), path, cfg.IgnoreMissingPaths))
 		}
-	case cfg.UnrestrictedFilesystem && !cfg.UnrestrictedNetwork:
-		if len(net_rules) > 0 {
-			err = llCfg.RestrictNet(net_rules...)
+
+		for _, path := range cfg.ReadWriteExecutablePaths {
+			log.Debug("Adding read-write executable path: %s", path)
+			allRules = append(allRules, pathRule(getReadWriteExecutableRights(isDirectory(path)), path, cfg.IgnoreMissingPaths))
 		}
-	default:
-		var allRules []landlock.Rule
-		if !cfg.UnrestrictedFilesystem {
-			allRules = append(allRules, file_rules...)
+
+		for _, path := range cfg.ReadOnlyPaths {
+			log.Debug("Adding read-only path: %s", path)
+			allRules = append(allRules, pathRule(getReadOnlyRights(isDirectory(path)), path, cfg.IgnoreMissingPaths))
 		}
-		if !cfg.UnrestrictedNetwork {
-			allRules = append(allRules, net_rules...)
+
+		for _, path := range cfg.ReadWritePaths {
+			log.Debug("Adding read-write path: %s", path)
+			allRules = append(allRules, pathRule(getReadWriteRights(isDirectory(path)), path, cfg.IgnoreMissingPaths))
 		}
-		if len(allRules) > 0 {
-			err = llCfg.Restrict(allRules...)
+
+		for _, path := range cfg.UnixSocketPaths {
+			log.Debug("Adding UNIX socket (connect) path: %s", path)
+			allRules = append(allRules, pathRule(getUnixSocketRights(isDirectory(path)), path, cfg.IgnoreMissingPaths))
+		}
+	} else if len(cfg.UnixSocketPaths) > 0 {
+		log.Info("Ignoring --unix paths because filesystem access is unrestricted.")
+	}
+
+	if !cfg.UnrestrictedNetwork {
+		for _, port := range cfg.BindTCPPorts {
+			log.Debug("Adding TCP bind port: %d", port)
+			allRules = append(allRules, landlock.BindTCP(uint16(port)))
+		}
+
+		for _, port := range cfg.ConnectTCPPorts {
+			log.Debug("Adding TCP connect port: %d", port)
+			allRules = append(allRules, landlock.ConnectTCP(uint16(port)))
 		}
 	}
+
+	// Build the Landlock configuration. Start from a custom config that
+	// handles exactly the domains we want to restrict, so that all rules are
+	// enforced in a single ruleset layer. This keeps the "refer" access
+	// right working (it is implicitly denied whenever the filesystem domain
+	// is not handled by a layer).
+	baseCfg, err := landlock.NewConfig(configArgs...)
 	if err != nil {
+		return fmt.Errorf("failed to build Landlock config: %w", err)
+	}
+	llCfg := *baseCfg
+
+	if cfg.BestEffort {
+		llCfg = llCfg.BestEffort()
+	}
+
+	// Audit logging configuration (Landlock ABI V7+). Without --best-effort
+	// these assert a V7+ kernel and will error at restriction time otherwise.
+	if cfg.DisableLogOriginating {
+		llCfg = llCfg.DisableLoggingForOriginatingProcess()
+	}
+	if cfg.EnableLogSubprocesses {
+		llCfg = llCfg.EnableLoggingForSubprocesses()
+	}
+	if cfg.DisableLogSubdomains {
+		llCfg = llCfg.DisableLoggingForSubdomains()
+	}
+
+	if len(allRules) == 0 {
+		log.Info("No rules provided; applying maximum restrictions for the handled domains.")
+	}
+
+	log.Debug("Applying Landlock restrictions: %s", llCfg.String())
+	if err := llCfg.Restrict(allRules...); err != nil {
 		return fmt.Errorf("failed to apply Landlock restrictions: %w", err)
 	}
 

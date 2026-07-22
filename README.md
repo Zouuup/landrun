@@ -6,16 +6,19 @@ Linux Landlock is a kernel-native security module that lets unprivileged process
 
 Landrun is designed to make it practical to sandbox any command with fine-grained filesystem and network access controls. No root. No containers. No SELinux/AppArmor configs.
 
-It's lightweight, auditable, and wraps Landlock v5 features (file access + TCP restrictions).
+It's lightweight, auditable, and wraps Landlock up to v9 features (file access, TCP restrictions, IPC scoping, and UNIX-socket controls).
 
 ## Features
 
-- 🔒 Kernel-level security using Landlock
+- 🔒 Kernel-level security using Landlock (up to ABI v9)
 - 🚀 Lightweight and fast execution
 - 🛡️ Fine-grained access control for directories and files
 - 🔄 Support for read and write paths
 - ⚡ Path-specific execution permissions
 - 🌐 TCP network access control (binding and connecting)
+- 📡 IPC scoping for abstract UNIX sockets and signals (ABI v6+)
+- 🔌 Pathname UNIX domain socket connect/sendmsg control (ABI v9+)
+- 📝 Audit logging configuration for Landlock denials (ABI v7+)
 
 ## Demo
 
@@ -27,7 +30,9 @@ It's lightweight, auditable, and wraps Landlock v5 features (file access + TCP r
 
 - Linux kernel 5.13 or later with Landlock enabled
 - Linux kernel 6.7 or later for network restrictions (TCP bind/connect)
-- Go 1.18 or later (for building from source)
+- Go 1.24 or later (for building from source)
+
+> By default landrun targets the highest Landlock ABI (v9). On older kernels, pass `--best-effort` so it gracefully degrades to the best ABI the running kernel supports (see [Best-Effort Mode](#best-effort-mode)).
 
 ## Installation
 
@@ -85,6 +90,7 @@ landrun [options] <command> [args...]
 - `--rox <path>`: Allow read-only access with execution to specified path (can be specified multiple times or as comma-separated values)
 - `--rw <path>`: Allow read-write access to specified path (can be specified multiple times or as comma-separated values)
 - `--rwx <path>`: Allow read-write access with execution to specified path (can be specified multiple times or as comma-separated values)
+- `--unix <path>`: Allow `connect(2)`/`sendmsg(2)` on the specified pathname UNIX domain socket (Landlock ABI v9+; can be specified multiple times or as comma-separated values)
 - `--bind-tcp <port>`: Allow binding to specified TCP port (can be specified multiple times or as comma-separated values)
 - `--connect-tcp <port>`: Allow connecting to specified TCP port (can be specified multiple times or as comma-separated values)
 - `--env <var>`: Environment variable to pass to the sandboxed command (format: KEY=VALUE or just KEY to pass current value)
@@ -92,6 +98,11 @@ landrun [options] <command> [args...]
 - `--log-level <level>`: Set logging level (error, info, debug) [default: "error"]
 - `--unrestricted-network`: Allows unrestricted network access (disables all network restrictions)
 - `--unrestricted-filesystem`: Allows unrestricted filesystem access (disables all filesystem restrictions)
+- `--unrestricted-scoped`: Allows unrestricted IPC scoping, i.e. does not restrict abstract UNIX sockets and signals (Landlock ABI v6+) [default: disabled]
+- `--ignore-missing`: Gracefully ignore paths that do not exist instead of failing [default: disabled]
+- `--log-disable-originating`: Disable audit logging of denials from the originating process (Landlock ABI v7+)
+- `--log-enable-subprocesses`: Enable audit logging of denials after `execve(2)` in subprocesses (Landlock ABI v7+)
+- `--log-disable-subdomains`: Disable audit logging of denials from nested Landlock domains (Landlock ABI v7+)
 - `--add-exec`: Automatically adds the executing binary to --rox
 - `--ldd`: Automatically adds required libraries to --rox
 
@@ -102,9 +113,11 @@ landrun [options] <command> [args...]
 - Use `--rwx` for directories or files where you need both write access and the ability to execute files
 - Network restrictions require Linux kernel 6.7 or later with Landlock ABI v4
 - By default, no environment variables are passed to the sandboxed command. Use `--env` to explicitly pass environment variables
-- The `--best-effort` flag allows graceful degradation on older kernels that don't support all requested restrictions
+- The `--best-effort` flag allows graceful degradation on older kernels that don't support all requested restrictions. Because the default target is Landlock ABI v9, you will usually want `--best-effort` unless you are on a very recent kernel
 - Paths can be specified either using multiple flags or as comma-separated values (e.g., `--ro /usr,/lib,/home`)
 - If no paths or network rules are specified and neither unrestricted flag is set, landrun will apply maximum restrictions (denying all access)
+- By default, IPC scoping is restricted: the sandboxed process cannot connect to abstract UNIX sockets or send signals to processes outside its Landlock domain (ABI v6+). Use `--unrestricted-scoped` if this breaks your workload (e.g. some X11 or D-Bus setups)
+- On ABI v9+ kernels, connecting to pathname UNIX domain sockets created outside the sandbox (e.g. DNS/NSS via `nscd`, D-Bus, database sockets) is restricted. Grant access to specific sockets with `--unix <path>`
 
 ### Environment Variables
 
@@ -209,6 +222,24 @@ landrun --ldd --add-exec /usr/bin/true
 
 Note that shared libs always need exec permission due to how they are loaded, PROT_EXEC on mmap() etc.
 
+16. Allow connecting to a pathname UNIX domain socket (ABI v9+), e.g. a database socket:
+
+```bash
+landrun --best-effort --rox /usr --ro /etc --unix /run/postgresql/.s.PGSQL.5432 -- psql ...
+```
+
+17. Gracefully ignore optional paths that may not exist:
+
+```bash
+landrun --best-effort --ignore-missing --rox /usr --ro /etc,/opt/optional-config -- myapp
+```
+
+18. Allow abstract UNIX sockets / signals to reach outside the sandbox (relax IPC scoping):
+
+```bash
+landrun --best-effort --unrestricted-scoped --rox /usr --ro /etc -- some-gui-app
+```
+
 ## Systemd Integration
 
 landrun can be integrated with systemd to run services with enhanced security. Here's an example of running nginx with landrun:
@@ -223,6 +254,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/landrun \
+    --best-effort \
     --rox /usr/bin,/usr/lib \
     --ro  /etc/nginx,/etc/ssl,/etc/passwd,/etc/group,/etc/nsswitch.conf \
     --rwx /var/log/nginx \
@@ -285,6 +317,7 @@ landrun leverages Landlock's fine-grained access control mechanisms, which inclu
 - Read files (`LANDLOCK_ACCESS_FS_READ_FILE`)
 - Truncate files (`LANDLOCK_ACCESS_FS_TRUNCATE`) - Available since Landlock ABI v3
 - IOCTL operations on devices (`LANDLOCK_ACCESS_FS_IOCTL_DEV`) - Available since Landlock ABI v5
+- Connect/sendmsg on pathname UNIX sockets (`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`) - Available since Landlock ABI v9 (granted per-path with `--unix`)
 
 **Directory-specific rights:**
 
@@ -299,22 +332,34 @@ landrun leverages Landlock's fine-grained access control mechanisms, which inclu
 - Bind to specific TCP ports (`LANDLOCK_ACCESS_NET_BIND_TCP`)
 - Connect to specific TCP ports (`LANDLOCK_ACCESS_NET_CONNECT_TCP`)
 
+**IPC scoping** (requires Linux 6.12+ with Landlock ABI v6):
+
+- Restrict connections to abstract UNIX sockets outside the domain (`LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET`)
+- Restrict sending signals to processes outside the domain (`LANDLOCK_SCOPE_SIGNAL`)
+
+These are restricted by default and can be relaxed with `--unrestricted-scoped`.
+
 ### Limitations
 
 - Landlock must be supported by your kernel
 - Network restrictions require Linux kernel 6.7 or later with Landlock ABI v4
+- TCP restrictions only apply to "classic" TCP sockets, not Multipath TCP. Since Go 1.24, `net.Listen` defaults to Multipath TCP and therefore cannot currently be restricted by Landlock (kernel bug [landlock-lsm/linux#54](https://github.com/landlock-lsm/linux/issues/54))
 - Some operations may require additional permissions
 - Files or directories opened before sandboxing are not subject to Landlock restrictions
 
 ## Kernel Compatibility Table
 
-| Feature                            | Minimum Kernel Version | Landlock ABI Version |
-| ---------------------------------- | ---------------------- | -------------------- |
-| Basic filesystem sandboxing        | 5.13                   | 1                    |
-| File referring/reparenting control | 5.19                   | 2                    |
-| File truncation control            | 6.2                    | 3                    |
-| Network TCP restrictions           | 6.7                    | 4                    |
-| IOCTL on special files             | 6.10                   | 5                    |
+| Feature                                       | Minimum Kernel Version | Landlock ABI Version |
+| --------------------------------------------- | ---------------------- | -------------------- |
+| Basic filesystem sandboxing                   | 5.13                   | 1                    |
+| File referring/reparenting control            | 5.19                   | 2                    |
+| File truncation control                       | 6.2                    | 3                    |
+| Network TCP restrictions                      | 6.7                    | 4                    |
+| IOCTL on special files                        | 6.10                   | 5                    |
+| IPC scoping (abstract UNIX sockets, signals)  | 6.12                   | 6                    |
+| Audit logging of denials                      | 6.15                   | 7                    |
+| Thread synchronization (TSYNC)                | 7.0                    | 8                    |
+| Pathname UNIX socket connect/sendmsg control  | latest                 | 9                    |
 
 ## Troubleshooting
 
@@ -340,18 +385,28 @@ If you receive "permission denied" or similar errors:
 
 ### Implementation
 
-This project uses the [landlock-lsm/go-landlock](https://github.com/landlock-lsm/go-landlock) package for sandboxing, which provides both filesystem and network restrictions. The current implementation supports:
+This project uses the [landlock-lsm/go-landlock](https://github.com/landlock-lsm/go-landlock) package (v0.9.0) for sandboxing, which provides filesystem, network and IPC-scope restrictions. The current implementation targets Landlock ABI v9 and supports:
 
 - Read/write/execute restrictions for files and directories
 - TCP port binding restrictions
 - TCP port connection restrictions
+- IPC scoping (abstract UNIX sockets and signals)
+- Pathname UNIX domain socket connect/sendmsg control (`--unix`)
+- Audit logging configuration for Landlock denials (`--log-*`)
+- Graceful handling of missing paths (`--ignore-missing`)
 - Best-effort mode for graceful degradation on older kernels
 
 ### Best-Effort Mode
 
+By default, landrun targets the highest Landlock ABI (v9) in strict mode, so on any kernel that does not support v9 it will fail unless `--best-effort` is used.
+
 When using `--best-effort` (disabled by default), landrun will gracefully degrade to using the best available Landlock version on the current kernel. This means:
 
-- On Linux 6.7+: Full filesystem and network restrictions
+- On Linux 7.0+: All of the below, plus thread synchronization (TSYNC) and, on ABI v9 kernels, pathname UNIX socket controls
+- On Linux 6.15+: Adds audit logging configuration (ABI v7)
+- On Linux 6.12+: Adds IPC scoping for abstract UNIX sockets and signals (ABI v6)
+- On Linux 6.10+: Filesystem, network and IOCTL restrictions (ABI v5)
+- On Linux 6.7+: Full filesystem and network restrictions (ABI v4)
 - On Linux 6.2-6.6: Filesystem restrictions including truncation, but no network restrictions
 - On Linux 5.19-6.1: Basic filesystem restrictions including file reparenting, but no truncation control or network restrictions
 - On Linux 5.13-5.18: Basic filesystem restrictions without file reparenting, truncation control, or network restrictions
@@ -394,7 +449,6 @@ Based on the Linux Landlock API capabilities, we plan to add:
 
 - 🔒 Enhanced filesystem controls with more fine-grained permissions
 - 🌐 Support for UDP and other network protocol restrictions (when supported by Linux kernel)
-- 🔄 Process scoping and resource controls
 - 🛡️ Additional security features as they become available in the Landlock API
 
 ## Acknowledgements
