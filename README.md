@@ -8,6 +8,8 @@ Landrun is designed to make it practical to sandbox any command with fine-graine
 
 It's lightweight, auditable, and wraps Landlock up to v9 features (file access, TCP restrictions, IPC scoping, and UNIX-socket controls).
 
+[Binaries are not trustworthy](https://zoup.org/landrun-binaries-are-not-trustworthy/)
+
 ## Features
 
 - 🔒 Kernel-level security using Landlock (up to ABI v9)
