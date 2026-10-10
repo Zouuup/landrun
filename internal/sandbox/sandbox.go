@@ -17,6 +17,8 @@ type Config struct {
 	UnixSocketPaths          []string
 	BindTCPPorts             []int
 	ConnectTCPPorts          []int
+	BindUDPPorts             []int
+	ConnectUDPPorts          []int
 	BestEffort               bool
 	UnrestrictedFilesystem   bool
 	UnrestrictedNetwork      bool
@@ -29,8 +31,8 @@ type Config struct {
 }
 
 // fullFSAccess is the union of every filesystem access right supported by
-// Landlock V9. It is used as the Config's handled access set so that every
-// per-path rule we build stays within its bounds.
+// Landlock V10 (same FS rights as V9). It is used as the Config's handled access set
+// so that every per-path rule we build stays within its bounds.
 const fullFSAccess = landlock.AccessFSSet(
 	syscall.AccessFSExecute |
 		syscall.AccessFSWriteFile |
@@ -52,12 +54,15 @@ const fullFSAccess = landlock.AccessFSSet(
 )
 
 // fullNetAccess is the union of every network access right supported by
-// Landlock V9 (available since V4).
+// Landlock V10 (available since V4 for TCP, V10 for UDP).
 const fullNetAccess = landlock.AccessNetSet(
-	syscall.AccessNetBindTCP | syscall.AccessNetConnectTCP,
+	syscall.AccessNetBindTCP |
+		syscall.AccessNetConnectTCP |
+		syscall.AccessNetBindUDP |
+		syscall.AccessNetConnectSendUDP,
 )
 
-// fullScoped is the union of every IPC scope supported by Landlock V9
+// fullScoped is the union of every IPC scope supported by Landlock V10
 // (available since V6).
 const fullScoped = landlock.ScopedSet(
 	syscall.ScopeAbstractUnixSocket | syscall.ScopeSignal,
@@ -178,6 +183,33 @@ func Apply(cfg Config) error {
 		log.Info("Unrestricted IPC scoping enabled.")
 	}
 
+	llCfg, allRules, err := buildLandlockConfig(cfg)
+	if err != nil {
+		return err
+	}
+
+	// If every domain is unrestricted, there is nothing for Landlock to do.
+	if llCfg == nil {
+		log.Info("Unrestricted filesystem, network and IPC scoping enabled; no rules applied.")
+		return nil
+	}
+
+	if len(allRules) == 0 {
+		log.Info("No rules provided; applying maximum restrictions for the handled domains.")
+	}
+
+	log.Debug("Applying Landlock restrictions: %s", llCfg.String())
+	if err := llCfg.Restrict(allRules...); err != nil {
+		return fmt.Errorf("failed to apply Landlock restrictions: %w", err)
+	}
+
+	log.Info("Landlock restrictions applied successfully")
+	return nil
+}
+
+// buildLandlockConfig constructs the landlock.Config and rule set for cfg.
+// It returns nil, nil, nil if every domain is unrestricted.
+func buildLandlockConfig(cfg Config) (*landlock.Config, []landlock.Rule, error) {
 	// Determine which access domains should be handled (i.e. restricted).
 	// A domain that is left out of the Config stays completely unrestricted.
 	var configArgs []interface{}
@@ -193,8 +225,7 @@ func Apply(cfg Config) error {
 
 	// If every domain is unrestricted, there is nothing for Landlock to do.
 	if len(configArgs) == 0 {
-		log.Info("Unrestricted filesystem, network and IPC scoping enabled; no rules applied.")
-		return nil
+		return nil, nil, nil
 	}
 
 	// Collect our rules. Filesystem rules are only meaningful when the
@@ -234,13 +265,35 @@ func Apply(cfg Config) error {
 
 	if !cfg.UnrestrictedNetwork {
 		for _, port := range cfg.BindTCPPorts {
+			if port < 0 || port > 65535 {
+				return nil, nil, fmt.Errorf("invalid TCP bind port %d: must be between 0 and 65535", port)
+			}
 			log.Debug("Adding TCP bind port: %d", port)
 			allRules = append(allRules, landlock.BindTCP(uint16(port)))
 		}
 
 		for _, port := range cfg.ConnectTCPPorts {
+			if port < 0 || port > 65535 {
+				return nil, nil, fmt.Errorf("invalid TCP connect port %d: must be between 0 and 65535", port)
+			}
 			log.Debug("Adding TCP connect port: %d", port)
 			allRules = append(allRules, landlock.ConnectTCP(uint16(port)))
+		}
+
+		for _, port := range cfg.BindUDPPorts {
+			if port < 0 || port > 65535 {
+				return nil, nil, fmt.Errorf("invalid UDP bind port %d: must be between 0 and 65535", port)
+			}
+			log.Debug("Adding UDP bind port: %d", port)
+			allRules = append(allRules, landlock.BindUDP(uint16(port)))
+		}
+
+		for _, port := range cfg.ConnectUDPPorts {
+			if port < 0 || port > 65535 {
+				return nil, nil, fmt.Errorf("invalid UDP connect port %d: must be between 0 and 65535", port)
+			}
+			log.Debug("Adding UDP connect/send port: %d", port)
+			allRules = append(allRules, landlock.ConnectSendUDP(uint16(port)))
 		}
 	}
 
@@ -251,7 +304,7 @@ func Apply(cfg Config) error {
 	// is not handled by a layer).
 	baseCfg, err := landlock.NewConfig(configArgs...)
 	if err != nil {
-		return fmt.Errorf("failed to build Landlock config: %w", err)
+		return nil, nil, fmt.Errorf("failed to build Landlock config: %w", err)
 	}
 	llCfg := *baseCfg
 
@@ -271,15 +324,5 @@ func Apply(cfg Config) error {
 		llCfg = llCfg.DisableLoggingForSubdomains()
 	}
 
-	if len(allRules) == 0 {
-		log.Info("No rules provided; applying maximum restrictions for the handled domains.")
-	}
-
-	log.Debug("Applying Landlock restrictions: %s", llCfg.String())
-	if err := llCfg.Restrict(allRules...); err != nil {
-		return fmt.Errorf("failed to apply Landlock restrictions: %w", err)
-	}
-
-	log.Info("Landlock restrictions applied successfully")
-	return nil
+	return &llCfg, allRules, nil
 }
