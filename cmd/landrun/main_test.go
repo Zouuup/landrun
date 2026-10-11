@@ -400,3 +400,112 @@ func TestFlagParsingUnrestrictedNetwork(t *testing.T) {
 		t.Errorf("UnrestrictedNetwork = false, want true")
 	}
 }
+
+func TestParseSandboxConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		cliArgs  []string
+		validate func(t *testing.T, cfg sandbox.Config)
+	}{
+		{
+			name:    "unrestricted network with bind tcp decoupled",
+			cliArgs: []string{"landrun", "--unrestricted-network", "--bind-tcp", "12345", "dummy"},
+			validate: func(t *testing.T, cfg sandbox.Config) {
+				if !cfg.UnrestrictedNetwork {
+					t.Errorf("expected UnrestrictedNetwork to be true")
+				}
+				if !reflect.DeepEqual(cfg.BindTCPPorts, []int{12345}) {
+					t.Errorf("expected BindTCPPorts [12345], got %v", cfg.BindTCPPorts)
+				}
+				if cfg.RestrictBindTCP {
+					t.Errorf("expected RestrictBindTCP to be false")
+				}
+			},
+		},
+		{
+			name:    "unrestricted egress alias with bind tcp",
+			cliArgs: []string{"landrun", "--unrestricted-egress", "--bind-tcp", "8080,9090", "dummy"},
+			validate: func(t *testing.T, cfg sandbox.Config) {
+				if !cfg.UnrestrictedNetwork {
+					t.Errorf("expected UnrestrictedNetwork to be true via --unrestricted-egress alias")
+				}
+				if !reflect.DeepEqual(cfg.BindTCPPorts, []int{8080, 9090}) {
+					t.Errorf("expected BindTCPPorts [8080 9090], got %v", cfg.BindTCPPorts)
+				}
+			},
+		},
+		{
+			name:    "unrestricted network with explicit restrict-bind-tcp",
+			cliArgs: []string{"landrun", "--unrestricted-network", "--restrict-bind-tcp", "dummy"},
+			validate: func(t *testing.T, cfg sandbox.Config) {
+				if !cfg.UnrestrictedNetwork {
+					t.Errorf("expected UnrestrictedNetwork to be true")
+				}
+				if !cfg.RestrictBindTCP {
+					t.Errorf("expected RestrictBindTCP to be true")
+				}
+				if len(cfg.BindTCPPorts) != 0 {
+					t.Errorf("expected empty BindTCPPorts, got %v", cfg.BindTCPPorts)
+				}
+			},
+		},
+		{
+			name:    "restricted network with bind and connect ports",
+			cliArgs: []string{"landrun", "--bind-tcp", "8080", "--connect-tcp", "443", "dummy"},
+			validate: func(t *testing.T, cfg sandbox.Config) {
+				if cfg.UnrestrictedNetwork {
+					t.Errorf("expected UnrestrictedNetwork to be false")
+				}
+				if !reflect.DeepEqual(cfg.BindTCPPorts, []int{8080}) {
+					t.Errorf("expected BindTCPPorts [8080], got %v", cfg.BindTCPPorts)
+				}
+				if !reflect.DeepEqual(cfg.ConnectTCPPorts, []int{443}) {
+					t.Errorf("expected ConnectTCPPorts [443], got %v", cfg.ConnectTCPPorts)
+				}
+			},
+		},
+		{
+			name:    "path permissions and options parsing",
+			cliArgs: []string{"landrun", "--ro", "/etc", "--rox", "/usr/bin", "--rw", "/tmp", "--rwx", "/var/log", "--unix", "/run/app.sock", "--best-effort", "--ignore-missing", "dummy"},
+			validate: func(t *testing.T, cfg sandbox.Config) {
+				if !reflect.DeepEqual(cfg.ReadOnlyPaths, []string{"/etc", "/usr/bin"}) {
+					t.Errorf("unexpected ReadOnlyPaths: %v", cfg.ReadOnlyPaths)
+				}
+				if !reflect.DeepEqual(cfg.ReadWritePaths, []string{"/tmp", "/var/log"}) {
+					t.Errorf("unexpected ReadWritePaths: %v", cfg.ReadWritePaths)
+				}
+				if !reflect.DeepEqual(cfg.ReadOnlyExecutablePaths, []string{"/usr/bin"}) {
+					t.Errorf("unexpected ReadOnlyExecutablePaths: %v", cfg.ReadOnlyExecutablePaths)
+				}
+				if !reflect.DeepEqual(cfg.ReadWriteExecutablePaths, []string{"/var/log"}) {
+					t.Errorf("unexpected ReadWriteExecutablePaths: %v", cfg.ReadWriteExecutablePaths)
+				}
+				if !reflect.DeepEqual(cfg.UnixSocketPaths, []string{"/run/app.sock"}) {
+					t.Errorf("unexpected UnixSocketPaths: %v", cfg.UnixSocketPaths)
+				}
+				if !cfg.BestEffort {
+					t.Errorf("expected BestEffort to be true")
+				}
+				if !cfg.IgnoreMissingPaths {
+					t.Errorf("expected IgnoreMissingPaths to be true")
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			app := newApp()
+			var capturedCfg sandbox.Config
+			app.Action = func(ctx context.Context, c *cli.Command) error {
+				capturedCfg = parseSandboxConfig(c)
+				return nil
+			}
+
+			if err := app.Run(context.Background(), tc.cliArgs); err != nil {
+				t.Fatalf("app.Run failed: %v", err)
+			}
+			tc.validate(t, capturedCfg)
+		})
+	}
+}

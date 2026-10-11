@@ -94,14 +94,15 @@ landrun [options] <command> [args...]
 - `--rw <path>`: Allow read-write access to specified path (can be specified multiple times or as comma-separated values)
 - `--rwx <path>`: Allow read-write access with execution to specified path (can be specified multiple times or as comma-separated values)
 - `--unix <path>`: Allow `connect(2)`/`sendmsg(2)` on the specified pathname UNIX domain socket (Landlock ABI v9+; can be specified multiple times or as comma-separated values)
-- `--bind-tcp <port>`: Allow binding to specified TCP port or port range like `32000-32768` (can be specified multiple times or as comma-separated values)
+- `--bind-tcp <port>`: Allow binding to specified TCP port or port range like `32000-32768` (can be specified multiple times or as comma-separated values; restricts TCP binding even when network egress is unrestricted)
 - `--connect-tcp <port>`: Allow connecting to specified TCP port or port range (can be specified multiple times or as comma-separated values)
 - `--bind-udp <port>`: Allow binding to specified UDP port or port range (Landlock ABI v10+; can be specified multiple times or as comma-separated values)
 - `--connect-udp <port>`: Allow connecting/sending to specified UDP port or port range (Landlock ABI v10+; can be specified multiple times or as comma-separated values)
+- `--restrict-bind-tcp`: Restrict TCP port binding independently of outgoing network access
 - `--env <var>`: Environment variable to pass to the sandboxed command (format: KEY=VALUE or just KEY to pass current value)
 - `--best-effort`: Use best effort mode, falling back to less restrictive sandbox if necessary [default: disabled]
 - `--log-level <level>`: Set logging level (error, info, debug) [default: "error"]
-- `--unrestricted-network`: Allows unrestricted network access (disables all network restrictions)
+- `--unrestricted-network`: Allow unrestricted network access, or unrestricted outgoing access when combined with TCP bind restrictions (alias: `--unrestricted-egress`)
 - `--unrestricted-filesystem`: Allows unrestricted filesystem access (disables all filesystem restrictions)
 - `--unrestricted-scoped`: Allows unrestricted IPC scoping, i.e. does not restrict abstract UNIX sockets and signals (Landlock ABI v6+) [default: disabled]
 - `--ignore-missing`: Gracefully ignore paths that do not exist instead of failing [default: disabled]
@@ -182,7 +183,15 @@ landrun --rox /usr --connect-tcp 80,443,32000-32768 /usr/bin/my-client
 landrun --best-effort --rox /usr --bind-udp 5000-5010 --connect-udp 53 /usr/bin/my-udp-server
 ```
 
-8. Run a DNS client with appropriate permissions:
+8. Run with unrestricted outgoing network access while restricting TCP bind ports:
+
+```bash
+landrun --rox /usr/ --ro /lib,/lib64 --unrestricted-network --bind-tcp 8080 /usr/bin/my-server
+```
+
+This permits outgoing network connections while restricting incoming TCP binds to port 8080.
+
+9. Run a DNS client with appropriate permissions:
 
 ```bash
 landrun --log-level debug --ro /etc,/usr --rox /usr/ --connect-tcp 443 nc kernel.org 443
@@ -190,25 +199,25 @@ landrun --log-level debug --ro /etc,/usr --rox /usr/ --connect-tcp 443 nc kernel
 
 This allows connections to port 443, requires access to /etc/resolv.conf for resolving DNS.
 
-9. Run a web server with selective network permissions:
+10. Run a web server with selective network permissions:
 
 ```bash
 landrun --rox /usr/bin --ro /lib,/lib64,/var/www --rwx /var/log --bind-tcp 80,443 /usr/bin/nginx
 ```
 
-10. Running anything without providing parameters is... maximum security jail!
+11. Running anything without providing parameters is... maximum security jail!
 
 ```bash
 landrun ls
 ```
 
-11. If you keep getting permission denied without knowing what exactly going on, best to use strace with it.
+12. If you keep getting permission denied without knowing what exactly going on, best to use strace with it.
 
 ```bash
 landrun --rox /usr strace -f -e trace=all ls
 ```
 
-12. Run with specific environment variables:
+13. Run with specific environment variables:
 
 ```bash
 landrun --rox /usr --ro /etc --env HOME --env PATH --env CUSTOM_VAR=my_value -- env
@@ -216,18 +225,18 @@ landrun --rox /usr --ro /etc --env HOME --env PATH --env CUSTOM_VAR=my_value -- 
 
 This example passes the current HOME and PATH variables, plus a custom variable named CUSTOM_VAR.
 
-13. Run command with explicity access to files instead of directories:
+14. Run command with explicity access to files instead of directories:
 ```bash
 landrun --rox /usr/lib/libc.so.6 --rox /usr/lib64/ld-linux-x86-64.so.2  --rox /usr/bin/true /usr/bin/true
 ```
 
-14. Run a command with --add-exec which automatically adds target binary to --rox
+15. Run a command with --add-exec which automatically adds target binary to --rox
 
 ```bash
 landrun --rox /usr/lib/ --add-exec /usr/bin/true
 ```
 
-15. Run a command with --ldd and --add-exec which automatically adds required libraries and target binary to --rox
+16. Run a command with --ldd and --add-exec which automatically adds required libraries and target binary to --rox
 
 ```bash
 landrun --ldd --add-exec /usr/bin/true
@@ -235,19 +244,19 @@ landrun --ldd --add-exec /usr/bin/true
 
 Note that shared libs always need exec permission due to how they are loaded, PROT_EXEC on mmap() etc.
 
-16. Allow connecting to a pathname UNIX domain socket (ABI v9+), e.g. a database socket:
+17. Allow connecting to a pathname UNIX domain socket (ABI v9+), e.g. a database socket:
 
 ```bash
 landrun --best-effort --rox /usr --ro /etc --unix /run/postgresql/.s.PGSQL.5432 -- psql ...
 ```
 
-17. Gracefully ignore optional paths that may not exist:
+18. Gracefully ignore optional paths that may not exist:
 
 ```bash
 landrun --best-effort --ignore-missing --rox /usr --ro /etc,/opt/optional-config -- myapp
 ```
 
-18. Allow abstract UNIX sockets / signals to reach outside the sandbox (relax IPC scoping):
+19. Allow abstract UNIX sockets / signals to reach outside the sandbox (relax IPC scoping):
 
 ```bash
 landrun --best-effort --unrestricted-scoped --rox /usr --ro /etc -- some-gui-app
