@@ -3,7 +3,7 @@ module github.com/zouuup/landrun
 go 1.24.0
 
 require (
-	github.com/landlock-lsm/go-landlock v0.10.0
+	github.com/landlock-lsm/go-landlock v0.10.1
 	github.com/urfave/cli/v3 v3.6.2
 )
 
