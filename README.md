@@ -94,10 +94,10 @@ landrun [options] <command> [args...]
 - `--rw <path>`: Allow read-write access to specified path (can be specified multiple times or as comma-separated values)
 - `--rwx <path>`: Allow read-write access with execution to specified path (can be specified multiple times or as comma-separated values)
 - `--unix <path>`: Allow `connect(2)`/`sendmsg(2)` on the specified pathname UNIX domain socket (Landlock ABI v9+; can be specified multiple times or as comma-separated values)
-- `--bind-tcp <port>`: Allow binding to specified TCP port (can be specified multiple times or as comma-separated values)
-- `--connect-tcp <port>`: Allow connecting to specified TCP port (can be specified multiple times or as comma-separated values)
-- `--bind-udp <port>`: Allow binding to specified UDP port (Landlock ABI v10+; can be specified multiple times or as comma-separated values)
-- `--connect-udp <port>`: Allow connecting/sending to specified UDP port (Landlock ABI v10+; can be specified multiple times or as comma-separated values)
+- `--bind-tcp <port>`: Allow binding to specified TCP port or port range like `32000-32768` (can be specified multiple times or as comma-separated values)
+- `--connect-tcp <port>`: Allow connecting to specified TCP port or port range (can be specified multiple times or as comma-separated values)
+- `--bind-udp <port>`: Allow binding to specified UDP port or port range (Landlock ABI v10+; can be specified multiple times or as comma-separated values)
+- `--connect-udp <port>`: Allow connecting/sending to specified UDP port or port range (Landlock ABI v10+; can be specified multiple times or as comma-separated values)
 - `--env <var>`: Environment variable to pass to the sandboxed command (format: KEY=VALUE or just KEY to pass current value)
 - `--best-effort`: Use best effort mode, falling back to less restrictive sandbox if necessary [default: disabled]
 - `--log-level <level>`: Set logging level (error, info, debug) [default: "error"]
@@ -173,6 +173,14 @@ landrun --rox /usr/ --ro /lib,/lib64 --bind-tcp 8080 --connect-tcp 80 /usr/bin/m
 ```
 
 This will allow the program to only bind to TCP port 8080 and connect to TCP port 80.
+
+Ports also accept `START-END` ranges, alone or mixed with single ports:
+
+```bash
+landrun --rox /usr --bind-tcp 8000-8100 /usr/bin/my-server
+landrun --rox /usr --connect-tcp 80,443,32000-32768 /usr/bin/my-client
+landrun --best-effort --rox /usr --bind-udp 5000-5010 --connect-udp 53 /usr/bin/my-udp-server
+```
 
 8. Run a DNS client with appropriate permissions:
 

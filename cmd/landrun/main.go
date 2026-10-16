@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	osexec "os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/urfave/cli/v3"
@@ -49,25 +51,25 @@ func newApp() *cli.Command {
 				Name:  "unix",
 				Usage: "Allow connect(2)/sendmsg(2) on this pathname UNIX domain socket (Landlock ABI v9+)",
 			},
-			&cli.IntSliceFlag{
-				Name:   "bind-tcp",
-				Usage:  "Allow binding to these TCP ports",
-				Hidden: false,
+			&cli.StringSliceFlag{
+				Name:      "bind-tcp",
+				Usage:     "Allow binding to these TCP ports (single port or range, e.g. 8080 or 32000-32768)",
+				Validator: validatePortSpecs,
 			},
-			&cli.IntSliceFlag{
-				Name:   "connect-tcp",
-				Usage:  "Allow connecting to these TCP ports",
-				Hidden: false,
+			&cli.StringSliceFlag{
+				Name:      "connect-tcp",
+				Usage:     "Allow connecting to these TCP ports (single port or range, e.g. 443 or 32000-32768)",
+				Validator: validatePortSpecs,
 			},
-			&cli.IntSliceFlag{
-				Name:   "bind-udp",
-				Usage:  "Allow binding to these UDP ports (Landlock ABI v10+)",
-				Hidden: false,
+			&cli.StringSliceFlag{
+				Name:      "bind-udp",
+				Usage:     "Allow binding to these UDP ports (single port or range; Landlock ABI v10+)",
+				Validator: validatePortSpecs,
 			},
-			&cli.IntSliceFlag{
-				Name:   "connect-udp",
-				Usage:  "Allow connecting/sending to these UDP ports (Landlock ABI v10+)",
-				Hidden: false,
+			&cli.StringSliceFlag{
+				Name:      "connect-udp",
+				Usage:     "Allow connecting/sending to these UDP ports (single port or range; Landlock ABI v10+)",
+				Validator: validatePortSpecs,
 			},
 			&cli.BoolFlag{
 				Name:  "best-effort",
@@ -185,10 +187,10 @@ func buildConfig(c *cli.Command, binary string, libPaths []string) sandbox.Confi
 		ReadOnlyExecutablePaths:  readOnlyExecutablePaths,
 		ReadWriteExecutablePaths: readWriteExecutablePaths,
 		UnixSocketPaths:          c.StringSlice("unix"),
-		BindTCPPorts:             c.IntSlice("bind-tcp"),
-		ConnectTCPPorts:          c.IntSlice("connect-tcp"),
-		BindUDPPorts:             c.IntSlice("bind-udp"),
-		ConnectUDPPorts:          c.IntSlice("connect-udp"),
+		BindTCPPorts:             portsFlag(c, "bind-tcp"),
+		ConnectTCPPorts:          portsFlag(c, "connect-tcp"),
+		BindUDPPorts:             portsFlag(c, "bind-udp"),
+		ConnectUDPPorts:          portsFlag(c, "connect-udp"),
 		BestEffort:               c.Bool("best-effort"),
 		UnrestrictedFilesystem:   c.Bool("unrestricted-filesystem"),
 		UnrestrictedNetwork:      c.Bool("unrestricted-network"),
@@ -198,6 +200,62 @@ func buildConfig(c *cli.Command, binary string, libPaths []string) sandbox.Confi
 		EnableLogSubprocesses:    c.Bool("log-enable-subprocesses"),
 		DisableLogSubdomains:     c.Bool("log-disable-subdomains"),
 	}
+}
+
+// parsePortSpecs expands port specs such as "8080" or "32000-32768" into
+// the list of individual ports they cover.
+func parsePortSpecs(specs []string) ([]int, error) {
+	var ports []int
+	for _, spec := range specs {
+		spec = strings.TrimSpace(spec)
+		startStr, endStr, isRange := strings.Cut(spec, "-")
+
+		start, err := parsePort(startStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid port %q: %w", spec, err)
+		}
+		end := start
+		if isRange {
+			end, err = parsePort(endStr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid port range %q: %w", spec, err)
+			}
+			if start > end {
+				return nil, fmt.Errorf("invalid port range %q: start is greater than end", spec)
+			}
+		}
+
+		for p := start; p <= end; p++ {
+			ports = append(ports, p)
+		}
+	}
+	return ports, nil
+}
+
+func parsePort(s string) (int, error) {
+	port, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("not a number")
+	}
+	if port < 0 || port > 65535 {
+		return 0, fmt.Errorf("must be between 0 and 65535")
+	}
+	return port, nil
+}
+
+func validatePortSpecs(specs []string) error {
+	_, err := parsePortSpecs(specs)
+	return err
+}
+
+// portsFlag returns the expanded ports of a flag already checked by
+// validatePortSpecs.
+func portsFlag(c *cli.Command, name string) []int {
+	ports, err := parsePortSpecs(c.StringSlice(name))
+	if err != nil {
+		log.Fatal("--%s: %v", name, err)
+	}
+	return ports
 }
 
 func main() {

@@ -58,7 +58,7 @@ print_error() {
 if [ "$USE_SYSTEM_BINARY" = false ]; then
 	if [ "$NO_BUILD" = false ]; then
 		print_status "Building landrun binary..."
-		go build -o landrun cmd/landrun/main.go
+		go build -o landrun ./cmd/landrun
 		if [ $? -ne 0 ]; then
 			print_error "Failed to build landrun binary"
 			exit 1
@@ -115,8 +115,37 @@ echo "#!/bin/bash" > "$RW_DIR/rw_script.sh"
 echo "echo 'this script is in a read-write directory'" >> "$RW_DIR/rw_script.sh"
 chmod +x "$RW_DIR/rw_script.sh"
 
+# Network probe for the local network tests: `netprobe.py <tcp|udp>-<bind|connect> PORT...`.
+# Exits 0 if every call got past Landlock, 13 if any was denied with
+# EACCES/EPERM, and 1 on any other error, so a Landlock denial cannot be
+# confused with e.g. a busy port or a refused connection.
+NETPROBE="$TEST_DIR/netprobe.py"
+cat > "$NETPROBE" <<'EOF'
+import socket, sys
+mode, ports = sys.argv[1], [int(p) for p in sys.argv[2:]]
+kind = socket.SOCK_STREAM if mode.startswith("tcp") else socket.SOCK_DGRAM
+for port in ports:
+    s = socket.socket(socket.AF_INET, kind)
+    s.settimeout(1)
+    try:
+        if mode.endswith("bind"):
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", port))
+        else:
+            s.connect(("127.0.0.1", port))
+            if kind == socket.SOCK_DGRAM:
+                s.send(b"x")
+    except PermissionError as e:
+        print(f"{mode} {port}: {e}", file=sys.stderr)
+        sys.exit(13)
+    except ConnectionRefusedError:
+        pass
+    finally:
+        s.close()
+EOF
+
 # Probe Landlock ABI version (0 if unavailable). Used by strict-mode tests.
-LANDLOCK_ABI=$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version@v0.10.0 2>/dev/null || echo 0)
+LANDLOCK_ABI=$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version 2>/dev/null || echo 0)
 LANDLOCK_ABI=$(echo "$LANDLOCK_ABI" | tr -d '[:space:]')
 print_status "Detected Landlock ABI: ${LANDLOCK_ABI}"
 
@@ -291,23 +320,25 @@ run_test "File redirection" \
     "./landrun --log-level debug --rox / --rw $RW_DIR --env PATH -- bash -c 'ls /usr > $RW_DIR/output.txt && cat $RW_DIR/output.txt'" \
     0
 
-# Network restrictions tests (if kernel supports it)
+# Network restrictions tests (if kernel supports it).
+# DNS lookups need --connect-udp 53 once Landlock restricts UDP (ABI v10+);
+# without it curl fails name resolution (exit 6) before any TCP connect.
 $INTERNET_ACCESS && run_test "TCP connection without permission" \
-    "./landrun --log-level debug --rox /usr --ro / -- curl -s --connect-timeout 2 https://example.com" \
+    "./landrun --log-level debug --rox /usr --ro / --connect-udp 53 -- curl -s --connect-timeout 2 https://example.com" \
     7
 
 $INTERNET_ACCESS && run_test "TCP connection with permission" \
-    "./landrun --log-level debug --rox /usr --ro / --connect-tcp 443 -- curl -s --connect-timeout 2 https://example.com" \
+    "./landrun --log-level debug --rox /usr --ro / --connect-udp 53 --connect-tcp 443 -- curl -s --connect-timeout 2 https://example.com" \
     0
 
 # Environment isolation tests
 export TEST_ENV_VAR="test_value_123"
-run_test "Environment isolation" \
-    "./landrun --log-level debug --rox /usr --ro / -- bash -c 'echo \$TEST_ENV_VAR'" \
+run_test "Environment isolation (no variables passed by default)" \
+    "./landrun --log-level debug --rox /usr --ro / -- bash -c '[[ -z \$TEST_ENV_VAR && -z \$HOME ]]'" \
     0
 
-run_test "Environment isolation (no variables should be passed)" \
-    "./landrun --log-level debug --rox /usr --ro / -- bash -c '[[ -z \$TEST_ENV_VAR ]] && echo \"No env var\" || echo \$TEST_ENV_VAR'" \
+run_test "Environment isolation (only --env variables are passed)" \
+    "./landrun --log-level debug --rox /usr --ro / --env PATH -- bash -c '[[ -z \$TEST_ENV_VAR && -n \$PATH ]]'" \
     0
 
 run_test "Passing specific environment variable" \
@@ -345,7 +376,7 @@ run_test "Restricted filesystem access" \
     1
 
 $INTERNET_ACCESS && run_test "Restricted network access" \
-    "./landrun --log-level debug --rox / -- curl -s --connect-timeout 2 http://kernel.org" \
+    "./landrun --log-level debug --rox / --connect-udp 53 -- curl -s --connect-timeout 2 http://kernel.org" \
     7
 
 # New feature tests (Landlock V6-V9 / go-landlock v0.9.0)
@@ -378,8 +409,8 @@ run_test "Missing env key is omitted" \
     "./landrun --log-level debug --rox /usr --ro / --env LANDRUN_MISSING_ENV_KEY_XYZ --env PATH -- bash -c '[[ -z \$LANDRUN_MISSING_ENV_KEY_XYZ ]]'" \
     0
 
-run_test "LANDRUN_LOG_LEVEL env smoke" \
-    "LANDRUN_LOG_LEVEL=debug ./landrun --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- cat $RO_DIR/test.txt" \
+run_test "LANDRUN_LOG_LEVEL env enables debug logging" \
+    "LANDRUN_LOG_LEVEL=debug ./landrun --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- cat $RO_DIR/test.txt 2>&1 | grep -q 'landrun:debug'" \
     0
 
 # --- Filesystem edge cases ---
@@ -435,40 +466,22 @@ run_test "ldd with explicit rox of binary succeeds" \
 PYTHON=/usr/bin/python3
 BIND_PORT=18765
 BIND_PORT_OTHER=18766
-PY_LANDRUN="./landrun --log-level debug --add-exec --ldd --rox /usr --ro /etc"
+RANGE_LO=18770
+RANGE_HI=18779
+PY_LANDRUN="./landrun --log-level debug --add-exec --ldd --rox /usr --ro /etc --ro $NETPROBE"
+PROBE="$PYTHON $NETPROBE"
+DENIED=13
 
 run_test "TCP bind allowed on permitted port" \
-    "$PY_LANDRUN --bind-tcp $BIND_PORT -- $PYTHON -c \"
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(('127.0.0.1', $BIND_PORT))
-s.close()
-\"" \
+    "$PY_LANDRUN --bind-tcp $BIND_PORT -- $PROBE tcp-bind $BIND_PORT" \
     0
 
 run_test "TCP bind denied on non-permitted port" \
-    "$PY_LANDRUN --bind-tcp $BIND_PORT -- $PYTHON -c \"
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-try:
-    s.bind(('127.0.0.1', $BIND_PORT_OTHER))
-except OSError:
-    sys.exit(1)
-sys.exit(0)
-\"" \
-    1
+    "$PY_LANDRUN --bind-tcp $BIND_PORT -- $PROBE tcp-bind $BIND_PORT_OTHER" \
+    $DENIED
 
 run_test "Comma-separated bind-tcp ports" \
-    "$PY_LANDRUN --bind-tcp $BIND_PORT,$BIND_PORT_OTHER -- $PYTHON -c \"
-import socket
-for p in ($BIND_PORT, $BIND_PORT_OTHER):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(('127.0.0.1', p))
-    s.close()
-\"" \
+    "$PY_LANDRUN --bind-tcp $BIND_PORT,$BIND_PORT_OTHER -- $PROBE tcp-bind $BIND_PORT $BIND_PORT_OTHER" \
     0
 
 # Local connect allow/deny: start a listener outside the sandbox, connect from inside.
@@ -478,6 +491,7 @@ s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(('127.0.0.1', $BIND_PORT))
 s.listen(1)
+s.settimeout(10)
 os.write(1, b'ready\n')
 conn, _ = s.accept()
 conn.close()
@@ -500,85 +514,87 @@ s.close()
 
 wait $LISTENER_PID 2>/dev/null || true
 
-# Deny connect to a port that has no connect-tcp rule (listener not needed; connect fails at landlock)
 run_test "TCP connect denied to non-permitted local port" \
-    "$PY_LANDRUN --connect-tcp $BIND_PORT -- $PYTHON -c \"
-import socket, sys
-try:
-    s = socket.create_connection(('127.0.0.1', $BIND_PORT_OTHER), timeout=1)
-    s.close()
-    sys.exit(0)
-except OSError:
-    sys.exit(1)
-\"" \
-    1
+    "$PY_LANDRUN --connect-tcp $BIND_PORT -- $PROBE tcp-connect $BIND_PORT_OTHER" \
+    $DENIED
 
 # UDP tests
 run_test "UDP bind allowed on permitted port" \
-    "$PY_LANDRUN --bind-udp $BIND_PORT -- $PYTHON -c \"
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.bind(('127.0.0.1', $BIND_PORT))
-s.close()
-\"" \
+    "$PY_LANDRUN --bind-udp $BIND_PORT -- $PROBE udp-bind $BIND_PORT" \
     0
 
 run_test "Comma-separated bind-udp ports" \
-    "$PY_LANDRUN --bind-udp $BIND_PORT,$BIND_PORT_OTHER -- $PYTHON -c \"
-import socket
-for p in ($BIND_PORT, $BIND_PORT_OTHER):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(('127.0.0.1', p))
-    s.close()
-\"" \
+    "$PY_LANDRUN --bind-udp $BIND_PORT,$BIND_PORT_OTHER -- $PROBE udp-bind $BIND_PORT $BIND_PORT_OTHER" \
     0
 
 run_test "UDP connect allowed to permitted port" \
-    "$PY_LANDRUN --connect-udp $BIND_PORT -- $PYTHON -c \"
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.connect(('127.0.0.1', $BIND_PORT))
-s.close()
-\"" \
+    "$PY_LANDRUN --connect-udp $BIND_PORT -- $PROBE udp-connect $BIND_PORT" \
     0
 
 if [ "$LANDLOCK_ABI" -ge 10 ] 2>/dev/null; then
     run_test "UDP bind denied on non-permitted port" \
-        "$PY_LANDRUN --bind-udp $BIND_PORT -- $PYTHON -c \"
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-try:
-    s.bind(('127.0.0.1', $BIND_PORT_OTHER))
-except OSError:
-    sys.exit(1)
-sys.exit(0)
-\"" \
-        1
+        "$PY_LANDRUN --bind-udp $BIND_PORT -- $PROBE udp-bind $BIND_PORT_OTHER" \
+        $DENIED
 
     run_test "UDP connect denied on non-permitted port" \
-        "$PY_LANDRUN --connect-udp $BIND_PORT -- $PYTHON -c \"
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-try:
-    s.connect(('127.0.0.1', $BIND_PORT_OTHER))
-except OSError:
-    sys.exit(1)
-sys.exit(0)
-\"" \
-        1
+        "$PY_LANDRUN --connect-udp $BIND_PORT -- $PROBE udp-connect $BIND_PORT_OTHER" \
+        $DENIED
 fi
 
+# Port ranges (LO-HI) on every network flag; ports just outside must be denied.
+run_test "TCP bind allowed across port range" \
+    "$PY_LANDRUN --bind-tcp $RANGE_LO-$RANGE_HI -- $PROBE tcp-bind $RANGE_LO $((RANGE_LO + 5)) $RANGE_HI" \
+    0
+
+run_test "TCP bind denied below port range" \
+    "$PY_LANDRUN --bind-tcp $RANGE_LO-$RANGE_HI -- $PROBE tcp-bind $((RANGE_LO - 1))" \
+    $DENIED
+
+run_test "TCP bind denied above port range" \
+    "$PY_LANDRUN --bind-tcp $RANGE_LO-$RANGE_HI -- $PROBE tcp-bind $((RANGE_HI + 1))" \
+    $DENIED
+
+run_test "Single port and port range combined in bind-tcp" \
+    "$PY_LANDRUN --bind-tcp $BIND_PORT,$RANGE_LO-$RANGE_HI -- $PROBE tcp-bind $BIND_PORT $RANGE_HI" \
+    0
+
+run_test "TCP connect allowed across port range" \
+    "$PY_LANDRUN --connect-tcp $RANGE_LO-$RANGE_HI -- $PROBE tcp-connect $RANGE_LO $((RANGE_LO + 5)) $RANGE_HI" \
+    0
+
+run_test "TCP connect denied outside port range" \
+    "$PY_LANDRUN --connect-tcp $RANGE_LO-$RANGE_HI -- $PROBE tcp-connect $((RANGE_HI + 1))" \
+    $DENIED
+
+run_test "UDP bind allowed across port range" \
+    "$PY_LANDRUN --bind-udp $RANGE_LO-$RANGE_HI -- $PROBE udp-bind $RANGE_LO $RANGE_HI" \
+    0
+
+run_test "UDP connect allowed across port range" \
+    "$PY_LANDRUN --connect-udp $RANGE_LO-$RANGE_HI -- $PROBE udp-connect $RANGE_LO $RANGE_HI" \
+    0
+
+if [ "$LANDLOCK_ABI" -ge 10 ] 2>/dev/null; then
+    run_test "UDP bind denied outside port range" \
+        "$PY_LANDRUN --bind-udp $RANGE_LO-$RANGE_HI -- $PROBE udp-bind $((RANGE_HI + 1))" \
+        $DENIED
+
+    run_test "UDP connect denied outside port range" \
+        "$PY_LANDRUN --connect-udp $RANGE_LO-$RANGE_HI -- $PROBE udp-connect $((RANGE_LO - 1))" \
+        $DENIED
+fi
+
+run_test "Reversed port range is rejected" \
+    "./landrun --log-level error --bind-tcp $RANGE_HI-$RANGE_LO -- true 2>&1 | grep -q 'start is greater than end'" \
+    0
+
+run_test "Port range past 65535 is rejected" \
+    "./landrun --log-level error --connect-udp 65530-65536 -- true 2>&1 | grep -q 'must be between 0 and 65535'" \
+    0
+
 run_test "Unrestricted filesystem still restricts network without connect-tcp" \
-    "./landrun --log-level debug --unrestricted-filesystem --add-exec --ldd -- $PYTHON -c \"
-import socket, sys
-try:
-    s = socket.create_connection(('127.0.0.1', $BIND_PORT_OTHER), timeout=1)
-    s.close()
-    sys.exit(0)
-except OSError:
-    sys.exit(1)
-\"" \
-    1
+    "./landrun --log-level debug --unrestricted-filesystem --add-exec --ldd -- $PROBE tcp-connect $BIND_PORT_OTHER" \
+    $DENIED
 
 # --- Unrestricted / domain combos ---
 run_test "All domains unrestricted is a no-op sandbox" \
