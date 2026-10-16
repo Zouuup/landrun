@@ -1,9 +1,11 @@
 package sandbox
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/landlock-lsm/go-landlock/landlock"
@@ -183,6 +185,14 @@ func TestApplySubprocessEmptyRules(t *testing.T) {
 	runApplyInSubprocess(t, "TestApplyHelperEmptyRules")
 }
 
+func TestApplySubprocessUDPOnly(t *testing.T) {
+	runApplyInSubprocess(t, "TestApplyHelperUDPOnly")
+}
+
+func TestApplySubprocessInvalidPortFails(t *testing.T) {
+	runApplyInSubprocess(t, "TestApplyHelperInvalidPortFails")
+}
+
 func runApplyInSubprocess(t *testing.T, testName string) {
 	t.Helper()
 	if os.Getenv("LANDRUN_SANDBOX_HELPER") == "1" {
@@ -270,6 +280,8 @@ func TestApplyHelperNetAndFlags(t *testing.T) {
 		UnixSocketPaths:          []string{sock, dir},
 		BindTCPPorts:             []int{18080},
 		ConnectTCPPorts:          []int{443},
+		BindUDPPorts:             []int{53, 0},
+		ConnectUDPPorts:          []int{53},
 		DisableLogOriginating:    true,
 		EnableLogSubprocesses:    true,
 		DisableLogSubdomains:     true,
@@ -289,6 +301,7 @@ func TestApplyHelperUnrestrictedFSIgnoresUnix(t *testing.T) {
 		UnrestrictedFilesystem: true,
 		UnixSocketPaths:        []string{"/run/ignored.sock"},
 		BindTCPPorts:           []int{18081},
+		BindUDPPorts:           []int{18081},
 	})
 	if err != nil {
 		t.Fatalf("Apply unrestricted FS failed: %v", err)
@@ -308,6 +321,8 @@ func TestApplyHelperUnrestrictedNetwork(t *testing.T) {
 		ReadOnlyPaths:           []string{dir},
 		ReadOnlyExecutablePaths: []string{"/usr"},
 		BindTCPPorts:            []int{9999}, // ignored because net unrestricted
+		BindUDPPorts:            []int{9999}, // ignored because net unrestricted
+		ConnectUDPPorts:         []int{53},   // ignored because net unrestricted
 	})
 	if err != nil {
 		t.Fatalf("Apply unrestricted network failed: %v", err)
@@ -325,4 +340,130 @@ func TestApplyHelperEmptyRules(t *testing.T) {
 		t.Fatalf("Apply empty rules failed: %v", err)
 	}
 	os.Exit(0)
+}
+
+func TestApplyHelperUDPOnly(t *testing.T) {
+	if os.Getenv("LANDRUN_SANDBOX_HELPER") != "1" {
+		t.Skip("subprocess helper")
+	}
+	err := Apply(Config{
+		BestEffort:      true,
+		BindUDPPorts:    []int{0, 5353},
+		ConnectUDPPorts: []int{53},
+	})
+	if err != nil {
+		t.Fatalf("Apply UDP only failed: %v", err)
+	}
+	os.Exit(0)
+}
+
+func TestApplyHelperInvalidPortFails(t *testing.T) {
+	if os.Getenv("LANDRUN_SANDBOX_HELPER") != "1" {
+		t.Skip("subprocess helper")
+	}
+	err := Apply(Config{
+		BestEffort:   true,
+		BindUDPPorts: []int{-1},
+	})
+	if err == nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func TestBuildLandlockConfigABI10(t *testing.T) {
+	cfg := Config{
+		BindTCPPorts:    []int{8080},
+		ConnectTCPPorts: []int{443},
+		BindUDPPorts:    []int{53, 0},
+		ConnectUDPPorts: []int{5353},
+	}
+	llCfg, rules, err := buildLandlockConfig(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if llCfg == nil {
+		t.Fatal("expected non-nil llCfg")
+	}
+	str := llCfg.String()
+	if !strings.HasPrefix(str, "{Landlock V10;") {
+		t.Errorf("expected Landlock V10 config, got %s", str)
+	}
+
+	expectedRuleStrings := []string{
+		"ALLOW {bind_tcp} on port 8080",
+		"ALLOW {connect_tcp} on port 443",
+		"ALLOW {bind_udp} on port 53",
+		"ALLOW {bind_udp} on port 0",
+		"ALLOW {connect_send_udp} on port 5353",
+	}
+
+	foundMap := make(map[string]bool)
+	for _, r := range rules {
+		foundMap[fmt.Sprint(r)] = true
+	}
+	for _, expected := range expectedRuleStrings {
+		if !foundMap[expected] {
+			t.Errorf("missing expected rule: %s (got rules: %v)", expected, rules)
+		}
+	}
+}
+
+func TestBuildLandlockConfigBestEffort(t *testing.T) {
+	cfg := Config{
+		BestEffort:   true,
+		BindUDPPorts: []int{53},
+	}
+	llCfg, _, err := buildLandlockConfig(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(llCfg.String(), "(best effort)") {
+		t.Errorf("expected (best effort) in config string, got %s", llCfg.String())
+	}
+}
+
+func TestBuildLandlockConfigUnrestrictedNetwork(t *testing.T) {
+	cfg := Config{
+		UnrestrictedNetwork: true,
+		BindUDPPorts:        []int{53},
+		ConnectUDPPorts:     []int{53},
+		BindTCPPorts:        []int{80},
+	}
+	llCfg, rules, err := buildLandlockConfig(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	str := llCfg.String()
+	if !strings.Contains(str, "Net: ∅") {
+		t.Errorf("expected Net domain to be unhandled (Net: ∅), got %s", str)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules when net unrestricted, got %d", len(rules))
+	}
+}
+
+func TestBuildLandlockConfigInvalidPorts(t *testing.T) {
+	testCases := []struct {
+		name string
+		cfg  Config
+	}{
+		{"tcp bind negative", Config{BindTCPPorts: []int{-1}}},
+		{"tcp bind overflow", Config{BindTCPPorts: []int{65536}}},
+		{"tcp connect negative", Config{ConnectTCPPorts: []int{-5}}},
+		{"tcp connect overflow", Config{ConnectTCPPorts: []int{70000}}},
+		{"udp bind negative", Config{BindUDPPorts: []int{-1}}},
+		{"udp bind overflow", Config{BindUDPPorts: []int{65536}}},
+		{"udp connect negative", Config{ConnectUDPPorts: []int{-10}}},
+		{"udp connect overflow", Config{ConnectUDPPorts: []int{65536}}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := buildLandlockConfig(tc.cfg)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+		})
+	}
 }

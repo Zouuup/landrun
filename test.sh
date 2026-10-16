@@ -116,7 +116,7 @@ echo "echo 'this script is in a read-write directory'" >> "$RW_DIR/rw_script.sh"
 chmod +x "$RW_DIR/rw_script.sh"
 
 # Probe Landlock ABI version (0 if unavailable). Used by strict-mode tests.
-LANDLOCK_ABI=$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version@v0.9.0 2>/dev/null || echo 0)
+LANDLOCK_ABI=$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version@v0.10.0 2>/dev/null || echo 0)
 LANDLOCK_ABI=$(echo "$LANDLOCK_ABI" | tr -d '[:space:]')
 print_status "Detected Landlock ABI: ${LANDLOCK_ABI}"
 
@@ -131,10 +131,16 @@ run_test() {
         cmd="${cmd//.\/landrun/landrun}"
     fi
 
-    # The default target is Landlock ABI v9. Inject --best-effort so the suite
-    # gracefully degrades and runs on kernels below v9. This only affects which
+    # The default target is Landlock ABI v10. Inject --best-effort so the suite
+    # gracefully degrades and runs on kernels below v10. This only affects which
     # ABI level is targeted; the allow/deny semantics being tested are unchanged.
     cmd="${cmd/landrun /landrun --best-effort }"
+
+    if [ ! -d "/lib64" ]; then
+        cmd="${cmd//--ro \/lib64 /}"
+        cmd="${cmd//,--ro \/lib64/}"
+        cmd="${cmd//,\/lib64/}"
+    fi
 
     print_status "Running test: $name"
     eval "$cmd"
@@ -157,6 +163,12 @@ run_test_strict() {
 
     if [ "$USE_SYSTEM_BINARY" = true ]; then
         cmd="${cmd//.\/landrun/landrun}"
+    fi
+
+    if [ ! -d "/lib64" ]; then
+        cmd="${cmd//--ro \/lib64 /}"
+        cmd="${cmd//,--ro \/lib64/}"
+        cmd="${cmd//,\/lib64/}"
     fi
 
     print_status "Running test (strict): $name"
@@ -501,6 +513,61 @@ except OSError:
 \"" \
     1
 
+# UDP tests
+run_test "UDP bind allowed on permitted port" \
+    "$PY_LANDRUN --bind-udp $BIND_PORT -- $PYTHON -c \"
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('127.0.0.1', $BIND_PORT))
+s.close()
+\"" \
+    0
+
+run_test "Comma-separated bind-udp ports" \
+    "$PY_LANDRUN --bind-udp $BIND_PORT,$BIND_PORT_OTHER -- $PYTHON -c \"
+import socket
+for p in ($BIND_PORT, $BIND_PORT_OTHER):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(('127.0.0.1', p))
+    s.close()
+\"" \
+    0
+
+run_test "UDP connect allowed to permitted port" \
+    "$PY_LANDRUN --connect-udp $BIND_PORT -- $PYTHON -c \"
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect(('127.0.0.1', $BIND_PORT))
+s.close()
+\"" \
+    0
+
+if [ "$LANDLOCK_ABI" -ge 10 ] 2>/dev/null; then
+    run_test "UDP bind denied on non-permitted port" \
+        "$PY_LANDRUN --bind-udp $BIND_PORT -- $PYTHON -c \"
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.bind(('127.0.0.1', $BIND_PORT_OTHER))
+except OSError:
+    sys.exit(1)
+sys.exit(0)
+\"" \
+        1
+
+    run_test "UDP connect denied on non-permitted port" \
+        "$PY_LANDRUN --connect-udp $BIND_PORT -- $PYTHON -c \"
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(('127.0.0.1', $BIND_PORT_OTHER))
+except OSError:
+    sys.exit(1)
+sys.exit(0)
+\"" \
+        1
+fi
+
 run_test "Unrestricted filesystem still restricts network without connect-tcp" \
     "./landrun --log-level debug --unrestricted-filesystem --add-exec --ldd -- $PYTHON -c \"
 import socket, sys
@@ -526,7 +593,7 @@ run_test "FS restricted with net and scoped unrestricted" \
     "./landrun --log-level debug --unrestricted-network --unrestricted-scoped --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- cat $RO_DIR/test.txt" \
     0
 
-# --- V6-V9 flag smokes ---
+# --- V6-V10 flag smokes ---
 run_test "Audit log flags smoke with best-effort" \
     "./landrun --log-level debug --log-disable-originating --log-enable-subprocesses --log-disable-subdomains --rox /usr --ro /lib --ro /lib64 --ro $RO_DIR -- cat $RO_DIR/test.txt" \
     0
@@ -536,13 +603,13 @@ run_test "unix on a directory path" \
     0
 
 # --- Strict mode (no --best-effort) ---
-if [ "$LANDLOCK_ABI" -lt 9 ] 2>/dev/null; then
-    run_test_strict "Strict V9 fails on ABI < 9 kernels" \
+if [ "$LANDLOCK_ABI" -lt 10 ] 2>/dev/null; then
+    run_test_strict "Strict V10 fails on ABI < 10 kernels" \
         "./landrun --log-level error --rox /usr --ro /lib --ro /lib64 -- true" \
         1
 else
-    print_status "Skipping strict-V9 failure test (kernel ABI >= 9)"
-    run_test_strict "Strict V9 succeeds on ABI >= 9 kernels" \
+    print_status "Skipping strict-V10 failure test (kernel ABI >= 10)"
+    run_test_strict "Strict V10 succeeds on ABI >= 10 kernels" \
         "./landrun --log-level error --rox /usr --ro /lib --ro /lib64 --add-exec --ldd -- true" \
         0
 fi

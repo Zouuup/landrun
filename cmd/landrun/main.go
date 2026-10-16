@@ -17,8 +17,8 @@ import (
 // Version is the current version of landrun
 const Version = "0.1.18"
 
-func main() {
-	app := &cli.Command{
+func newApp() *cli.Command {
+	return &cli.Command{
 		Name:    "landrun",
 		Usage:   "Run a command in a Landlock sandbox",
 		Version: Version,
@@ -57,6 +57,16 @@ func main() {
 			&cli.IntSliceFlag{
 				Name:   "connect-tcp",
 				Usage:  "Allow connecting to these TCP ports",
+				Hidden: false,
+			},
+			&cli.IntSliceFlag{
+				Name:   "bind-udp",
+				Usage:  "Allow binding to these UDP ports (Landlock ABI v10+)",
+				Hidden: false,
+			},
+			&cli.IntSliceFlag{
+				Name:   "connect-udp",
+				Usage:  "Allow connecting/sending to these UDP ports (Landlock ABI v10+)",
 				Hidden: false,
 			},
 			&cli.BoolFlag{
@@ -124,59 +134,20 @@ func main() {
 				log.Fatal("Missing command to run")
 			}
 
-			// Combine --ro and --rox paths for read-only access
-			readOnlyPaths := append([]string{}, c.StringSlice("ro")...)
-			readOnlyPaths = append(readOnlyPaths, c.StringSlice("rox")...)
-
-			// Combine --rw and --rwx paths for read-write access
-			readWritePaths := append([]string{}, c.StringSlice("rw")...)
-			readWritePaths = append(readWritePaths, c.StringSlice("rwx")...)
-
-			// Combine --rox and --rwx paths for executable permissions
-			readOnlyExecutablePaths := append([]string{}, c.StringSlice("rox")...)
-			readWriteExecutablePaths := append([]string{}, c.StringSlice("rwx")...)
-
 			binary, err := osexec.LookPath(args[0])
 			if err != nil {
 				log.Fatal("Failed to find binary: %v", err)
 			}
 
-			// Add command to readOnlyExecutablePaths
-			if c.Bool("add-exec") {
-				readOnlyExecutablePaths = append(readOnlyExecutablePaths, binary)
-				log.Debug("Added executable path: %v", binary)
-			}
-
-			// If --ldd flag is set, detect and add library dependencies
+			var libPaths []string
 			if c.Bool("ldd") {
-				libPaths, err := elfdeps.GetLibraryDependencies(binary)
+				libPaths, err = elfdeps.GetLibraryDependencies(binary)
 				if err != nil {
 					log.Fatal("Failed to detect library dependencies: %v", err)
 				}
-				// Add library directories to readOnlyExecutablePaths
-				readOnlyExecutablePaths = append(readOnlyExecutablePaths, libPaths...)
-				log.Debug("Added library paths: %v", libPaths)
 			}
 
-			cfg := sandbox.Config{
-				ReadOnlyPaths:            readOnlyPaths,
-				ReadWritePaths:           readWritePaths,
-				ReadOnlyExecutablePaths:  readOnlyExecutablePaths,
-				ReadWriteExecutablePaths: readWriteExecutablePaths,
-				UnixSocketPaths:          c.StringSlice("unix"),
-				BindTCPPorts:             c.IntSlice("bind-tcp"),
-				ConnectTCPPorts:          c.IntSlice("connect-tcp"),
-				BestEffort:               c.Bool("best-effort"),
-				UnrestrictedFilesystem:   c.Bool("unrestricted-filesystem"),
-				UnrestrictedNetwork:      c.Bool("unrestricted-network"),
-				UnrestrictedScoped:       c.Bool("unrestricted-scoped"),
-				IgnoreMissingPaths:       c.Bool("ignore-missing"),
-				DisableLogOriginating:    c.Bool("log-disable-originating"),
-				EnableLogSubprocesses:    c.Bool("log-enable-subprocesses"),
-				DisableLogSubdomains:     c.Bool("log-disable-subdomains"),
-			}
-
-			// Process environment variables
+			cfg := buildConfig(c, binary, libPaths)
 			envVars := processEnvironmentVars(c.StringSlice("env"))
 
 			if err := sandbox.Apply(cfg); err != nil {
@@ -186,7 +157,51 @@ func main() {
 			return exec.Run(args, envVars)
 		},
 	}
+}
 
+func buildConfig(c *cli.Command, binary string, libPaths []string) sandbox.Config {
+	readOnlyPaths := append([]string{}, c.StringSlice("ro")...)
+	readOnlyPaths = append(readOnlyPaths, c.StringSlice("rox")...)
+
+	readWritePaths := append([]string{}, c.StringSlice("rw")...)
+	readWritePaths = append(readWritePaths, c.StringSlice("rwx")...)
+
+	readOnlyExecutablePaths := append([]string{}, c.StringSlice("rox")...)
+	readWriteExecutablePaths := append([]string{}, c.StringSlice("rwx")...)
+
+	if c.Bool("add-exec") && binary != "" {
+		readOnlyExecutablePaths = append(readOnlyExecutablePaths, binary)
+		log.Debug("Added executable path: %v", binary)
+	}
+
+	if len(libPaths) > 0 {
+		readOnlyExecutablePaths = append(readOnlyExecutablePaths, libPaths...)
+		log.Debug("Added library paths: %v", libPaths)
+	}
+
+	return sandbox.Config{
+		ReadOnlyPaths:            readOnlyPaths,
+		ReadWritePaths:           readWritePaths,
+		ReadOnlyExecutablePaths:  readOnlyExecutablePaths,
+		ReadWriteExecutablePaths: readWriteExecutablePaths,
+		UnixSocketPaths:          c.StringSlice("unix"),
+		BindTCPPorts:             c.IntSlice("bind-tcp"),
+		ConnectTCPPorts:          c.IntSlice("connect-tcp"),
+		BindUDPPorts:             c.IntSlice("bind-udp"),
+		ConnectUDPPorts:          c.IntSlice("connect-udp"),
+		BestEffort:               c.Bool("best-effort"),
+		UnrestrictedFilesystem:   c.Bool("unrestricted-filesystem"),
+		UnrestrictedNetwork:      c.Bool("unrestricted-network"),
+		UnrestrictedScoped:       c.Bool("unrestricted-scoped"),
+		IgnoreMissingPaths:       c.Bool("ignore-missing"),
+		DisableLogOriginating:    c.Bool("log-disable-originating"),
+		EnableLogSubprocesses:    c.Bool("log-enable-subprocesses"),
+		DisableLogSubdomains:     c.Bool("log-disable-subdomains"),
+	}
+}
+
+func main() {
+	app := newApp()
 	if err := app.Run(context.Background(), os.Args); err != nil {
 		log.Fatal("%v", err)
 	}

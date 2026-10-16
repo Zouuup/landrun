@@ -6,18 +6,18 @@ Linux Landlock is a kernel-native security module that lets unprivileged process
 
 Landrun is designed to make it practical to sandbox any command with fine-grained filesystem and network access controls. No root. No containers. No SELinux/AppArmor configs.
 
-It's lightweight, auditable, and wraps Landlock up to v9 features (file access, TCP restrictions, IPC scoping, and UNIX-socket controls).
+It's lightweight, auditable, and wraps Landlock up to v10 features (file access, TCP and UDP restrictions, IPC scoping, and UNIX-socket controls).
 
 [Binaries are not trustworthy](https://zoup.org/landrun-binaries-are-not-trustworthy/)
 
 ## Features
 
-- 🔒 Kernel-level security using Landlock (up to ABI v9)
+- 🔒 Kernel-level security using Landlock (up to ABI v10)
 - 🚀 Lightweight and fast execution
 - 🛡️ Fine-grained access control for directories and files
 - 🔄 Support for read and write paths
 - ⚡ Path-specific execution permissions
-- 🌐 TCP network access control (binding and connecting)
+- 🌐 TCP and UDP network access control (binding and connecting)
 - 📡 IPC scoping for abstract UNIX sockets and signals (ABI v6+)
 - 🔌 Pathname UNIX domain socket connect/sendmsg control (ABI v9+)
 - 📝 Audit logging configuration for Landlock denials (ABI v7+)
@@ -31,10 +31,11 @@ It's lightweight, auditable, and wraps Landlock up to v9 features (file access, 
 ## Requirements
 
 - Linux kernel 5.13 or later with Landlock enabled
-- Linux kernel 6.7 or later for network restrictions (TCP bind/connect)
+- Linux kernel 6.7 or later for TCP network restrictions
+- Linux kernel 7.2 or later for UDP network restrictions (Landlock ABI v10)
 - Go 1.24 or later (for building from source)
 
-> By default landrun targets the highest Landlock ABI (v9). On older kernels, pass `--best-effort` so it gracefully degrades to the best ABI the running kernel supports (see [Best-Effort Mode](#best-effort-mode)).
+> By default landrun targets the highest Landlock ABI (v10). On older kernels, pass `--best-effort` so it gracefully degrades to the best ABI the running kernel supports (see [Best-Effort Mode](#best-effort-mode)).
 
 ## Installation
 
@@ -95,6 +96,8 @@ landrun [options] <command> [args...]
 - `--unix <path>`: Allow `connect(2)`/`sendmsg(2)` on the specified pathname UNIX domain socket (Landlock ABI v9+; can be specified multiple times or as comma-separated values)
 - `--bind-tcp <port>`: Allow binding to specified TCP port (can be specified multiple times or as comma-separated values)
 - `--connect-tcp <port>`: Allow connecting to specified TCP port (can be specified multiple times or as comma-separated values)
+- `--bind-udp <port>`: Allow binding to specified UDP port (Landlock ABI v10+; can be specified multiple times or as comma-separated values)
+- `--connect-udp <port>`: Allow connecting/sending to specified UDP port (Landlock ABI v10+; can be specified multiple times or as comma-separated values)
 - `--env <var>`: Environment variable to pass to the sandboxed command (format: KEY=VALUE or just KEY to pass current value)
 - `--best-effort`: Use best effort mode, falling back to less restrictive sandbox if necessary [default: disabled]
 - `--log-level <level>`: Set logging level (error, info, debug) [default: "error"]
@@ -113,9 +116,9 @@ landrun [options] <command> [args...]
 - You must explicitly add the directory or files to the command you want to run with `--rox` flag
 - For system commands, you typically need to include `/usr/bin`, `/usr/lib`, and other system directories
 - Use `--rwx` for directories or files where you need both write access and the ability to execute files
-- Network restrictions require Linux kernel 6.7 or later with Landlock ABI v4
+- TCP network restrictions require Linux kernel 6.7 or later with Landlock ABI v4; UDP network restrictions require Linux kernel 7.2 or later with Landlock ABI v10
 - By default, no environment variables are passed to the sandboxed command. Use `--env` to explicitly pass environment variables
-- The `--best-effort` flag allows graceful degradation on older kernels that don't support all requested restrictions. Because the default target is Landlock ABI v9, you will usually want `--best-effort` unless you are on a very recent kernel
+- The `--best-effort` flag allows graceful degradation on older kernels that don't support all requested restrictions. Because the default target is Landlock ABI v10, you will usually want `--best-effort` unless you are on a very recent kernel
 - Paths can be specified either using multiple flags or as comma-separated values (e.g., `--ro /usr,/lib,/home`)
 - If no paths or network rules are specified and neither unrestricted flag is set, landrun will apply maximum restrictions (denying all access)
 - By default, IPC scoping is restricted: the sandboxed process cannot connect to abstract UNIX sockets or send signals to processes outside its Landlock domain (ABI v6+). Use `--unrestricted-scoped` if this breaks your workload (e.g. some X11 or D-Bus setups)
@@ -302,7 +305,7 @@ landrun uses Linux's Landlock to create a secure sandbox environment. It provide
 - File system access control
 - Directory access restrictions
 - Execution control
-- TCP network restrictions
+- TCP and UDP network restrictions
 - Process isolation
 - Default restrictive mode when no rules are specified
 
@@ -329,10 +332,12 @@ landrun leverages Landlock's fine-grained access control mechanisms, which inclu
 - Create various filesystem objects (char devices, directories, regular files, sockets, etc.)
 - Refer/reparent files across directories (`LANDLOCK_ACCESS_FS_REFER`) - Available since Landlock ABI v2
 
-**Network-specific rights** (requires Linux 6.7+ with Landlock ABI v4):
+**Network-specific rights** (TCP requires Linux 6.7+ with Landlock ABI v4; UDP requires Linux 7.2+ with Landlock ABI v10):
 
 - Bind to specific TCP ports (`LANDLOCK_ACCESS_NET_BIND_TCP`)
 - Connect to specific TCP ports (`LANDLOCK_ACCESS_NET_CONNECT_TCP`)
+- Bind to specific UDP ports (`LANDLOCK_ACCESS_NET_BIND_UDP`)
+- Connect to and send datagrams to specific UDP ports (`LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP`)
 
 **IPC scoping** (requires Linux 6.12+ with Landlock ABI v6):
 
@@ -344,7 +349,7 @@ These are restricted by default and can be relaxed with `--unrestricted-scoped`.
 ### Limitations
 
 - Landlock must be supported by your kernel
-- Network restrictions require Linux kernel 6.7 or later with Landlock ABI v4
+- TCP network restrictions require Linux kernel 6.7 or later with Landlock ABI v4; UDP network restrictions require Linux kernel 7.2 or later with Landlock ABI v10
 - TCP restrictions only apply to "classic" TCP sockets, not Multipath TCP. Since Go 1.24, `net.Listen` defaults to Multipath TCP and therefore cannot currently be restricted by Landlock (kernel bug [landlock-lsm/linux#54](https://github.com/landlock-lsm/linux/issues/54))
 - Some operations may require additional permissions
 - Files or directories opened before sandboxing are not subject to Landlock restrictions
@@ -362,6 +367,7 @@ These are restricted by default and can be relaxed with `--unrestricted-scoped`.
 | Audit logging of denials                      | 6.15                   | 7                    |
 | Thread synchronization (TSYNC)                | 7.0                    | 8                    |
 | Pathname UNIX socket connect/sendmsg control  | latest                 | 9                    |
+| UDP network restrictions (bind/connect/send)  | 7.2                    | 10                   |
 
 ## Troubleshooting
 
@@ -387,11 +393,11 @@ If you receive "permission denied" or similar errors:
 
 ### Implementation
 
-This project uses the [landlock-lsm/go-landlock](https://github.com/landlock-lsm/go-landlock) package (v0.9.0) for sandboxing, which provides filesystem, network and IPC-scope restrictions. The current implementation targets Landlock ABI v9 and supports:
+This project uses the [landlock-lsm/go-landlock](https://github.com/landlock-lsm/go-landlock) package (v0.10.0) for sandboxing, which provides filesystem, network and IPC-scope restrictions. The current implementation targets Landlock ABI v10 and supports:
 
 - Read/write/execute restrictions for files and directories
-- TCP port binding restrictions
-- TCP port connection restrictions
+- TCP and UDP port binding restrictions
+- TCP and UDP port connection restrictions
 - IPC scoping (abstract UNIX sockets and signals)
 - Pathname UNIX domain socket connect/sendmsg control (`--unix`)
 - Audit logging configuration for Landlock denials (`--log-*`)
@@ -400,10 +406,11 @@ This project uses the [landlock-lsm/go-landlock](https://github.com/landlock-lsm
 
 ### Best-Effort Mode
 
-By default, landrun targets the highest Landlock ABI (v9) in strict mode, so on any kernel that does not support v9 it will fail unless `--best-effort` is used.
+By default, landrun targets the highest Landlock ABI (v10) in strict mode, so on any kernel that does not support v10 it will fail unless `--best-effort` is used.
 
 When using `--best-effort` (disabled by default), landrun will gracefully degrade to using the best available Landlock version on the current kernel. This means:
 
+- On Linux 7.2+: All of the below, plus UDP network restrictions (ABI v10)
 - On Linux 7.0+: All of the below, plus thread synchronization (TSYNC) and, on ABI v9 kernels, pathname UNIX socket controls
 - On Linux 6.15+: Adds audit logging configuration (ABI v7)
 - On Linux 6.12+: Adds IPC scoping for abstract UNIX sockets and signals (ABI v6)
@@ -450,7 +457,7 @@ Use `--use-system` to test against the system-installed landrun binary:
 Based on the Linux Landlock API capabilities, we plan to add:
 
 - 🔒 Enhanced filesystem controls with more fine-grained permissions
-- 🌐 Support for UDP and other network protocol restrictions (when supported by Linux kernel)
+- 🌐 Support for additional network protocol restrictions as Landlock introduces them
 - 🛡️ Additional security features as they become available in the Landlock API
 
 ## Acknowledgements
