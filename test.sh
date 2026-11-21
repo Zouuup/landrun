@@ -145,9 +145,18 @@ for port in ports:
 EOF
 
 # Probe Landlock ABI version (0 if unavailable). Used by strict-mode tests.
-LANDLOCK_ABI=$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version 2>/dev/null || echo 0)
-LANDLOCK_ABI=$(echo "$LANDLOCK_ABI" | tr -d '[:space:]')
-print_status "Detected Landlock ABI: ${LANDLOCK_ABI}"
+# If detection fails (e.g. no Go toolchain with --use-system), ABI-dependent
+# tests are skipped rather than run against a guessed ABI.
+LANDLOCK_ABI=$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version 2>/dev/null | tr -d '[:space:]')
+if ! [[ "$LANDLOCK_ABI" =~ ^[0-9]+$ ]]; then
+    LANDLOCK_ABI=unknown
+    print_status "Could not detect Landlock ABI; skipping ABI-dependent tests"
+else
+    print_status "Detected Landlock ABI: ${LANDLOCK_ABI}"
+fi
+# abi_at_least N / abi_below N: true only if the ABI is known and matches.
+abi_at_least() { [ "$LANDLOCK_ABI" != unknown ] && [ "$LANDLOCK_ABI" -ge "$1" ]; }
+abi_below() { [ "$LANDLOCK_ABI" != unknown ] && [ "$LANDLOCK_ABI" -lt "$1" ]; }
 
 # Function to run a test case
 run_test() {
@@ -531,7 +540,7 @@ run_test "UDP connect allowed to permitted port" \
     "$PY_LANDRUN --connect-udp $BIND_PORT -- $PROBE udp-connect $BIND_PORT" \
     0
 
-if [ "$LANDLOCK_ABI" -ge 10 ] 2>/dev/null; then
+if abi_at_least 10; then
     run_test "UDP bind denied on non-permitted port" \
         "$PY_LANDRUN --bind-udp $BIND_PORT -- $PROBE udp-bind $BIND_PORT_OTHER" \
         $DENIED
@@ -574,7 +583,7 @@ run_test "UDP connect allowed across port range" \
     "$PY_LANDRUN --connect-udp $RANGE_LO-$RANGE_HI -- $PROBE udp-connect $RANGE_LO $RANGE_HI" \
     0
 
-if [ "$LANDLOCK_ABI" -ge 10 ] 2>/dev/null; then
+if abi_at_least 10; then
     run_test "UDP bind denied outside port range" \
         "$PY_LANDRUN --bind-udp $RANGE_LO-$RANGE_HI -- $PROBE udp-bind $((RANGE_HI + 1))" \
         $DENIED
@@ -596,37 +605,32 @@ run_test "Unrestricted filesystem still restricts network without connect-tcp" \
     "./landrun --log-level debug --unrestricted-filesystem --add-exec --ldd -- $PROBE tcp-connect $BIND_PORT_OTHER" \
     $DENIED
 
-# --- Decoupled bind-tcp tests with unrestricted network ---
+# --- Bind restrictions with otherwise unrestricted network ---
 run_test "TCP bind allowed on permitted port with --unrestricted-network" \
-    "$PY_LANDRUN --unrestricted-network --bind-tcp $BIND_PORT -- $PYTHON -c \"
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(('127.0.0.1', $BIND_PORT))
-s.close()
-\"" \
+    "$PY_LANDRUN --unrestricted-network --bind-tcp $BIND_PORT -- $PROBE tcp-bind $BIND_PORT" \
     0
 
 run_test "TCP bind denied on non-permitted port with --unrestricted-network" \
-    "$PY_LANDRUN --unrestricted-network --bind-tcp $BIND_PORT -- $PYTHON -c \"
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-try:
-    s.bind(('127.0.0.1', $BIND_PORT_OTHER))
-except OSError:
-    sys.exit(1)
-sys.exit(0)
-\"" \
-    1
+    "$PY_LANDRUN --unrestricted-network --bind-tcp $BIND_PORT -- $PROBE tcp-bind $BIND_PORT_OTHER" \
+    $DENIED
 
-# Listener outside sandbox to verify outbound connect succeeds without connect-tcp
+run_test "TCP bind denied with --unrestricted-network and --restrict-bind-tcp" \
+    "$PY_LANDRUN --unrestricted-network --restrict-bind-tcp -- $PROBE tcp-bind $BIND_PORT" \
+    $DENIED
+
+run_test "UDP bind unaffected by TCP bind restrictions" \
+    "$PY_LANDRUN --unrestricted-network --restrict-bind-tcp -- $PROBE udp-bind $BIND_PORT" \
+    0
+
+# Listener outside the sandbox to verify outbound TCP works without --connect-tcp.
+# The timeout keeps the suite from hanging if the sandboxed connect never arrives.
 $PYTHON -c "
-import socket, time, os, signal
+import socket, os
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(('127.0.0.1', $BIND_PORT))
 s.listen(1)
+s.settimeout(10)
 os.write(1, b'ready\n')
 conn, _ = s.accept()
 conn.close()
@@ -639,27 +643,42 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
 done
 
 run_test "TCP connect allowed with --unrestricted-network and --bind-tcp" \
-    "$PY_LANDRUN --unrestricted-network --bind-tcp $BIND_PORT_OTHER -- $PYTHON -c \"
-import socket
-s = socket.create_connection(('127.0.0.1', $BIND_PORT), timeout=2)
-s.close()
-\"" \
+    "$PY_LANDRUN --unrestricted-network --bind-tcp $BIND_PORT_OTHER -- $PROBE tcp-connect $BIND_PORT" \
     0
 
 wait $LISTENER2_PID 2>/dev/null || true
 
-run_test "TCP bind denied with --unrestricted-network and --restrict-bind-tcp" \
-    "$PY_LANDRUN --unrestricted-network --restrict-bind-tcp -- $PYTHON -c \"
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-try:
-    s.bind(('127.0.0.1', $BIND_PORT))
-except OSError:
-    sys.exit(1)
-sys.exit(0)
-\"" \
-    1
+run_test "UDP bind allowed on permitted port with --unrestricted-network" \
+    "$PY_LANDRUN --unrestricted-network --bind-udp $BIND_PORT -- $PROBE udp-bind $BIND_PORT" \
+    0
+
+# Outgoing UDP on an unbound socket autobinds to an ephemeral port; that must
+# keep working when UDP binds are restricted (e.g. DNS lookups).
+run_test "UDP send allowed with --unrestricted-network and --restrict-bind-udp" \
+    "$PY_LANDRUN --unrestricted-network --restrict-bind-udp -- $PROBE udp-connect $BIND_PORT_OTHER" \
+    0
+
+run_test "TCP bind unaffected by UDP bind restrictions" \
+    "$PY_LANDRUN --unrestricted-network --restrict-bind-udp -- $PROBE tcp-bind $BIND_PORT" \
+    0
+
+if abi_at_least 10; then
+    run_test "UDP bind denied on non-permitted port with --unrestricted-network" \
+        "$PY_LANDRUN --unrestricted-network --bind-udp $BIND_PORT -- $PROBE udp-bind $BIND_PORT_OTHER" \
+        $DENIED
+
+    run_test "UDP bind denied with --unrestricted-network and --restrict-bind-udp" \
+        "$PY_LANDRUN --unrestricted-network --restrict-bind-udp -- $PROBE udp-bind $BIND_PORT" \
+        $DENIED
+else
+    print_status "Skipping UDP bind denial tests with --unrestricted-network (requires Landlock ABI v10+)"
+fi
+
+# --restrict-bind-tcp is redundant without --unrestricted-network: binds are
+# already denied unless listed in --bind-tcp.
+run_test "--restrict-bind-tcp without --unrestricted-network changes nothing" \
+    "$PY_LANDRUN --restrict-bind-tcp --bind-tcp $BIND_PORT -- $PROBE tcp-bind $BIND_PORT" \
+    0
 
 # --- Unrestricted / domain combos ---
 run_test "All domains unrestricted is a no-op sandbox" \
@@ -684,14 +703,30 @@ run_test "unix on a directory path" \
     0
 
 # --- Strict mode (no --best-effort) ---
-if [ "$LANDLOCK_ABI" -lt 10 ] 2>/dev/null; then
-    run_test_strict "Strict V10 fails on ABI < 10 kernels" \
-        "./landrun --log-level error --rox /usr --ro /lib --ro /lib64 -- true" \
-        1
-else
-    print_status "Skipping strict-V10 failure test (kernel ABI >= 10)"
-    run_test_strict "Strict V10 succeeds on ABI >= 10 kernels" \
-        "./landrun --log-level error --rox /usr --ro /lib --ro /lib64 --add-exec --ldd -- true" \
+# Strict mode runs on any Landlock kernel; it only fails when an option that
+# was passed explicitly needs a newer ABI than the kernel has.
+run_test_strict "Strict mode runs a plain sandbox on any ABI" \
+    "./landrun --log-level error --rox /usr --ro /lib --ro /lib64 --add-exec --ldd -- true" \
+    0
+
+if abi_below 10; then
+    run_test_strict "Strict mode warns about unenforced default restrictions" \
+        "./landrun --log-level error --rox /usr --ro /lib --ro /lib64 --add-exec --ldd -- true 2>&1 | grep -q 'not enforced: .*UDP'" \
+        0
+    run_test_strict "Strict mode rejects --connect-udp on ABI < 10" \
+        "./landrun --log-level error --rox /usr --connect-udp 53 -- true 2>&1 | grep -q 'needs ABI v10'" \
+        0
+    run_test "Best-effort mode allows --connect-udp on ABI < 10" \
+        "./landrun --log-level error --rox /usr --ro /lib --ro /lib64 --add-exec --ldd --connect-udp 53 -- true" \
+        0
+elif abi_at_least 10; then
+    run_test_strict "Strict mode accepts --connect-udp on ABI >= 10" \
+        "./landrun --log-level error --rox /usr --ro /lib --ro /lib64 --add-exec --ldd --connect-udp 53 -- true" \
+        0
+fi
+if abi_below 9; then
+    run_test_strict "Strict mode rejects --unix on ABI < 9" \
+        "./landrun --log-level error --rox /usr --unix /tmp -- true 2>&1 | grep -q 'needs ABI v9'" \
         0
 fi
 

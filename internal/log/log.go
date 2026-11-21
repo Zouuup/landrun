@@ -18,6 +18,7 @@ var (
 	debug = log.New(os.Stderr, "[landrun:debug] ", log.LstdFlags)
 	info  = log.New(os.Stderr, "[landrun] ", log.LstdFlags)
 	error = log.New(os.Stderr, "[landrun:error] ", log.LstdFlags)
+	warn  = log.New(os.Stderr, "[landrun:warn] ", log.LstdFlags)
 
 	currentLevel = LevelInfo // default level
 )
@@ -48,6 +49,12 @@ func Info(format string, v ...interface{}) {
 	if currentLevel >= LevelInfo {
 		info.Printf(format, v...)
 	}
+}
+
+// Warn logs a warning. Warnings are shown at every log level, since they
+// report something the user would not otherwise notice.
+func Warn(format string, v ...interface{}) {
+	warn.Printf(format, v...)
 }
 
 // Error logs an error message

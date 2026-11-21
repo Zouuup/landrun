@@ -6,13 +6,13 @@ Linux Landlock is a kernel-native security module that lets unprivileged process
 
 Landrun is designed to make it practical to sandbox any command with fine-grained filesystem and network access controls. No root. No containers. No SELinux/AppArmor configs.
 
-It's lightweight, auditable, and wraps Landlock up to v10 features (file access, TCP and UDP restrictions, IPC scoping, and UNIX-socket controls).
+It's lightweight, auditable, and wraps Landlock up to v11 features (file access, TCP and UDP restrictions, IPC scoping, and UNIX-socket controls).
 
 [Binaries are not trustworthy](https://zoup.org/landrun-binaries-are-not-trustworthy/)
 
 ## Features
 
-- 🔒 Kernel-level security using Landlock (up to ABI v10)
+- 🔒 Kernel-level security using Landlock (up to ABI v11), working on any kernel from ABI v1 onwards
 - 🚀 Lightweight and fast execution
 - 🛡️ Fine-grained access control for directories and files
 - 🔄 Support for read and write paths
@@ -33,9 +33,9 @@ It's lightweight, auditable, and wraps Landlock up to v10 features (file access,
 - Linux kernel 5.13 or later with Landlock enabled
 - Linux kernel 6.7 or later for TCP network restrictions
 - Linux kernel 7.2 or later for UDP network restrictions (Landlock ABI v10)
-- Go 1.24 or later (for building from source)
+- Go 1.26 or later (for building from source)
 
-> By default landrun targets the highest Landlock ABI (v10). On older kernels, pass `--best-effort` so it gracefully degrades to the best ABI the running kernel supports (see [Best-Effort Mode](#best-effort-mode)).
+> landrun runs on any Landlock-enabled kernel. It enforces everything the running kernel supports, warns about default restrictions an older kernel cannot enforce, and refuses to run if an option you passed explicitly (e.g. `--connect-udp` on a kernel without UDP support) cannot be enforced. See [Kernel Compatibility](#kernel-compatibility).
 
 ## Installation
 
@@ -94,15 +94,16 @@ landrun [options] <command> [args...]
 - `--rw <path>`: Allow read-write access to specified path (can be specified multiple times or as comma-separated values)
 - `--rwx <path>`: Allow read-write access with execution to specified path (can be specified multiple times or as comma-separated values)
 - `--unix <path>`: Allow `connect(2)`/`sendmsg(2)` on the specified pathname UNIX domain socket (Landlock ABI v9+; can be specified multiple times or as comma-separated values)
-- `--bind-tcp <port>`: Allow binding to specified TCP port or port range like `32000-32768` (can be specified multiple times or as comma-separated values; restricts TCP binding even when network egress is unrestricted)
+- `--bind-tcp <port>`: Allow binding to specified TCP port or port range like `32000-32768` (can be specified multiple times or as comma-separated values). Also enforced with `--unrestricted-network`, see below
 - `--connect-tcp <port>`: Allow connecting to specified TCP port or port range (can be specified multiple times or as comma-separated values)
-- `--bind-udp <port>`: Allow binding to specified UDP port or port range (Landlock ABI v10+; can be specified multiple times or as comma-separated values)
-- `--connect-udp <port>`: Allow connecting/sending to specified UDP port or port range (Landlock ABI v10+; can be specified multiple times or as comma-separated values)
-- `--restrict-bind-tcp`: Restrict TCP port binding independently of outgoing network access
+- `--bind-udp <port>`: Allow binding to specified UDP port or port range (Landlock ABI v10+; can be specified multiple times or as comma-separated values). Also enforced with `--unrestricted-network` (plus ephemeral port 0), see below
+- `--connect-udp <port>`: Allow connecting/sending to specified UDP port or port range (Landlock ABI v10+; can be specified multiple times or as comma-separated values). Also allows binding to ephemeral port 0, because the kernel implicitly binds an unbound UDP socket when it first sends
+- `--restrict-bind-tcp`: With `--unrestricted-network`, deny TCP binding except to `--bind-tcp` ports, even if none are given. Has no effect without `--unrestricted-network`, where binding is already restricted
+- `--restrict-bind-udp`: Same as `--restrict-bind-tcp`, for UDP (Landlock ABI v10+). Binding to an ephemeral port (port 0, including the kernel's implicit bind when an unbound socket first sends) stays allowed so outgoing UDP keeps working
 - `--env <var>`: Environment variable to pass to the sandboxed command (format: KEY=VALUE or just KEY to pass current value)
-- `--best-effort`: Use best effort mode, falling back to less restrictive sandbox if necessary [default: disabled]
+- `--best-effort`: Run even if the kernel cannot enforce options you passed explicitly, skipping those restrictions with a log message [default: disabled]
 - `--log-level <level>`: Set logging level (error, info, debug) [default: "error"]
-- `--unrestricted-network`: Allow unrestricted network access, or unrestricted outgoing access when combined with TCP bind restrictions (alias: `--unrestricted-egress`)
+- `--unrestricted-network`: Allow unrestricted network access (alias: `--unrestricted-egress`). If `--bind-tcp`/`--bind-udp` or `--restrict-bind-tcp`/`--restrict-bind-udp` are also given, outgoing access stays unrestricted but binding remains restricted for that protocol
 - `--unrestricted-filesystem`: Allows unrestricted filesystem access (disables all filesystem restrictions)
 - `--unrestricted-scoped`: Allows unrestricted IPC scoping, i.e. does not restrict abstract UNIX sockets and signals (Landlock ABI v6+) [default: disabled]
 - `--ignore-missing`: Gracefully ignore paths that do not exist instead of failing [default: disabled]
@@ -119,7 +120,7 @@ landrun [options] <command> [args...]
 - Use `--rwx` for directories or files where you need both write access and the ability to execute files
 - TCP network restrictions require Linux kernel 6.7 or later with Landlock ABI v4; UDP network restrictions require Linux kernel 7.2 or later with Landlock ABI v10
 - By default, no environment variables are passed to the sandboxed command. Use `--env` to explicitly pass environment variables
-- The `--best-effort` flag allows graceful degradation on older kernels that don't support all requested restrictions. Because the default target is Landlock ABI v10, you will usually want `--best-effort` unless you are on a very recent kernel
+- On older kernels, landrun still runs and warns about default restrictions it cannot enforce. It only refuses to run when an option you passed explicitly needs a newer kernel; `--best-effort` turns that into a warning as well
 - Paths can be specified either using multiple flags or as comma-separated values (e.g., `--ro /usr,/lib,/home`)
 - If no paths or network rules are specified and neither unrestricted flag is set, landrun will apply maximum restrictions (denying all access)
 - By default, IPC scoping is restricted: the sandboxed process cannot connect to abstract UNIX sockets or send signals to processes outside its Landlock domain (ABI v6+). Use `--unrestricted-scoped` if this breaks your workload (e.g. some X11 or D-Bus setups)
@@ -183,21 +184,21 @@ landrun --rox /usr --connect-tcp 80,443,32000-32768 /usr/bin/my-client
 landrun --best-effort --rox /usr --bind-udp 5000-5010 --connect-udp 53 /usr/bin/my-udp-server
 ```
 
-8. Run with unrestricted outgoing network access while restricting TCP bind ports:
+8. Run with unrestricted outgoing network access while restricting bind ports:
 
 ```bash
-landrun --rox /usr/ --ro /lib,/lib64 --unrestricted-network --bind-tcp 8080 /usr/bin/my-server
+landrun --rox /usr/ --ro /lib,/lib64 --unrestricted-network --bind-tcp 8080 --bind-udp 5353 /usr/bin/my-server
 ```
 
-This permits outgoing network connections while restricting incoming TCP binds to port 8080.
+This permits all outgoing connections while only allowing the program to bind TCP port 8080 and UDP port 5353 (plus ephemeral UDP ports for outgoing traffic). Use `--restrict-bind-tcp` to deny TCP binding entirely, or `--restrict-bind-udp` to deny UDP binding to any fixed port (ephemeral ports stay allowed so outgoing UDP works). UDP bind restrictions need Landlock ABI v10; with `--best-effort` on older kernels they are skipped.
 
 9. Run a DNS client with appropriate permissions:
 
 ```bash
-landrun --log-level debug --ro /etc,/usr --rox /usr/ --connect-tcp 443 nc kernel.org 443
+landrun --log-level debug --ro /etc,/usr --rox /usr/ --connect-tcp 443 --connect-udp 53 nc kernel.org 443
 ```
 
-This allows connections to port 443, requires access to /etc/resolv.conf for resolving DNS.
+This allows connections to port 443 and DNS queries to UDP port 53, and requires access to /etc/resolv.conf for resolving DNS. On kernels older than Landlock ABI v10, add `--best-effort`. If the host resolves names through systemd-resolved or nscd sockets, also allow those with `--unix`.
 
 10. Run a web server with selective network permissions:
 
@@ -410,7 +411,7 @@ If you receive "permission denied" or similar errors:
 
 ### Implementation
 
-This project uses the [landlock-lsm/go-landlock](https://github.com/landlock-lsm/go-landlock) package (v0.10.0) for sandboxing, which provides filesystem, network and IPC-scope restrictions. The current implementation targets Landlock ABI v10 and supports:
+This project uses the [landlock-lsm/go-landlock](https://github.com/landlock-lsm/go-landlock) package (v0.11.2) for sandboxing, which provides filesystem, network and IPC-scope restrictions. The current implementation targets Landlock ABI v11 and supports:
 
 - Read/write/execute restrictions for files and directories
 - TCP and UDP port binding restrictions
@@ -419,14 +420,32 @@ This project uses the [landlock-lsm/go-landlock](https://github.com/landlock-lsm
 - Pathname UNIX domain socket connect/sendmsg control (`--unix`)
 - Audit logging configuration for Landlock denials (`--log-*`)
 - Graceful handling of missing paths (`--ignore-missing`)
-- Best-effort mode for graceful degradation on older kernels
+- Graceful degradation on older kernels (see [Kernel Compatibility](#kernel-compatibility))
 
-### Best-Effort Mode
+### Kernel Compatibility
 
-By default, landrun targets the highest Landlock ABI (v10) in strict mode, so on any kernel that does not support v10 it will fail unless `--best-effort` is used.
+landrun targets the newest Landlock ABI it knows (v11) and works on every kernel from ABI v1 onwards, as well as on future kernels with a newer ABI.
 
-When using `--best-effort` (disabled by default), landrun will gracefully degrade to using the best available Landlock version on the current kernel. This means:
+landrun separates what you **explicitly asked for** from the **default restrictions** it applies to everything else:
 
+- **Explicit options** have a minimum ABI. If the kernel is older, landrun refuses to run and says which option needs which ABI, so a restriction you asked for is never silently dropped:
+
+  | Option | Minimum Landlock ABI |
+  |---|---|
+  | any filesystem restriction | v1 |
+  | `--rw`/`--rwx` on a directory (rename/link across directories) | v2 |
+  | `--bind-tcp`, `--connect-tcp`, `--restrict-bind-tcp` | v4 |
+  | `--log-disable-originating`, `--log-enable-subprocesses`, `--log-disable-subdomains` | v7 |
+  | `--unix` | v9 |
+  | `--bind-udp`, `--connect-udp`, `--restrict-bind-udp` | v10 |
+
+- **Default restrictions**, such as denying UDP when you passed no UDP options, are enforced as far as the kernel supports them. Anything the kernel cannot enforce is listed in a `[landrun:warn]` message.
+
+With `--best-effort`, landrun also runs when an explicit option needs a newer kernel. It skips that restriction and logs it at the `info` level. On ABI v1, `--rw`/`--rwx` on a directory disables the whole sandbox, because v1 cannot grant renames across directories.
+
+What each kernel can enforce:
+
+- ABI v11: Same restrictions as v10; go-landlock sets `no_new_privs` atomically with the sandbox
 - On Linux 7.2+: All of the below, plus UDP network restrictions (ABI v10)
 - On Linux 7.0+: All of the below, plus thread synchronization (TSYNC) and, on ABI v9 kernels, pathname UNIX socket controls
 - On Linux 6.15+: Adds audit logging configuration (ABI v7)

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -189,6 +190,10 @@ func TestApplySubprocessUnrestrictedNetworkWithRestrictBindTCP(t *testing.T) {
 	runApplyInSubprocess(t, "TestApplyHelperUnrestrictedNetworkWithRestrictBindTCP")
 }
 
+func TestApplySubprocessUnrestrictedNetworkWithRestrictBindUDP(t *testing.T) {
+	runApplyInSubprocess(t, "TestApplyHelperUnrestrictedNetworkWithRestrictBindUDP")
+}
+
 func TestApplySubprocessEmptyRules(t *testing.T) {
 	runApplyInSubprocess(t, "TestApplyHelperEmptyRules")
 }
@@ -199,165 +204,6 @@ func TestApplySubprocessUDPOnly(t *testing.T) {
 
 func TestApplySubprocessInvalidPortFails(t *testing.T) {
 	runApplyInSubprocess(t, "TestApplyHelperInvalidPortFails")
-}
-
-func TestBuildLandlockConfig_DecoupledBindTCP(t *testing.T) {
-	cfg := Config{
-		UnrestrictedNetwork: true,
-		BindTCPPorts:        []int{8080, 9090},
-	}
-	llCfg, rules, err := BuildLandlockConfig(cfg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if llCfg == nil {
-		t.Fatal("expected non-nil llCfg")
-	}
-	str := llCfg.String()
-	if !strings.Contains(str, "Net: {bind_tcp}") {
-		t.Errorf("expected Net domain to handle {bind_tcp}, got %s", str)
-	}
-	if strings.Contains(str, "connect_tcp") {
-		t.Errorf("expected connect_tcp not to be handled, got %s", str)
-	}
-	if len(rules) != 2 {
-		t.Fatalf("expected 2 rules, got %d", len(rules))
-	}
-	expectedRules := []string{
-		"ALLOW {bind_tcp} on port 8080",
-		"ALLOW {bind_tcp} on port 9090",
-	}
-	for i, exp := range expectedRules {
-		if fmt.Sprint(rules[i]) != exp {
-			t.Errorf("rule[%d] got %s, want %s", i, fmt.Sprint(rules[i]), exp)
-		}
-	}
-}
-
-func TestBuildLandlockConfig_RestrictBindTCPExplicit(t *testing.T) {
-	cfg := Config{
-		UnrestrictedNetwork: true,
-		RestrictBindTCP:     true,
-	}
-	llCfg, rules, err := BuildLandlockConfig(cfg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if llCfg == nil {
-		t.Fatal("expected non-nil llCfg")
-	}
-	str := llCfg.String()
-	if !strings.Contains(str, "Net: {bind_tcp}") {
-		t.Errorf("expected Net domain to handle {bind_tcp}, got %s", str)
-	}
-	if len(rules) != 0 {
-		t.Fatalf("expected 0 rules, got %d", len(rules))
-	}
-}
-
-func TestBuildLandlockConfig_UnrestrictedNetworkFully(t *testing.T) {
-	// With other domains handled (e.g. FS), Net should be unhandled (Net: ∅).
-	cfg := Config{
-		UnrestrictedNetwork: true,
-		ReadOnlyPaths:       []string{"/usr"},
-	}
-	llCfg, rules, err := BuildLandlockConfig(cfg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if llCfg == nil {
-		t.Fatal("expected non-nil llCfg")
-	}
-	str := llCfg.String()
-	if !strings.Contains(str, "Net: ∅") {
-		t.Errorf("expected Net: ∅ when unrestricted network has no bind restrictions, got %s", str)
-	}
-	// Verify no network rules are generated.
-	for _, r := range rules {
-		if strings.Contains(fmt.Sprint(r), "TCP") {
-			t.Errorf("unexpected net rule: %v", r)
-		}
-	}
-}
-
-func TestBuildLandlockConfig_RestrictedNetworkDefault(t *testing.T) {
-	cfg := Config{
-		UnrestrictedNetwork: false,
-		BindTCPPorts:        []int{8080},
-		ConnectTCPPorts:     []int{443},
-	}
-	llCfg, rules, err := BuildLandlockConfig(cfg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if llCfg == nil {
-		t.Fatal("expected non-nil llCfg")
-	}
-	str := llCfg.String()
-	if !strings.Contains(str, "Net: all") {
-		t.Errorf("expected Net domain to handle all, got %s", str)
-	}
-	if len(rules) != 2 {
-		t.Fatalf("expected 2 rules, got %d", len(rules))
-	}
-	ruleMap := make(map[string]bool)
-	for _, r := range rules {
-		ruleMap[fmt.Sprint(r)] = true
-	}
-	if !ruleMap["ALLOW {bind_tcp} on port 8080"] {
-		t.Errorf("missing bind rule in %v", rules)
-	}
-	if !ruleMap["ALLOW {connect_tcp} on port 443"] {
-		t.Errorf("missing connect rule in %v", rules)
-	}
-}
-
-func TestBuildLandlockConfig_UnrestrictedNetworkIgnoresConnectTCP(t *testing.T) {
-	cfg := Config{
-		UnrestrictedNetwork: true,
-		BindTCPPorts:        []int{8080},
-		ConnectTCPPorts:     []int{443},
-	}
-	llCfg, rules, err := BuildLandlockConfig(cfg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if llCfg == nil {
-		t.Fatal("expected non-nil llCfg")
-	}
-	str := llCfg.String()
-	if !strings.Contains(str, "Net: {bind_tcp}") {
-		t.Errorf("expected Net domain to handle {bind_tcp}, got %s", str)
-	}
-	if len(rules) != 1 {
-		t.Fatalf("expected only 1 rule (bind), got %d: %v", len(rules), rules)
-	}
-	if fmt.Sprint(rules[0]) != "ALLOW {bind_tcp} on port 8080" {
-		t.Errorf("unexpected rule: %v", rules[0])
-	}
-}
-
-func TestBuildLandlockConfig_InvalidPortNumbers(t *testing.T) {
-	cases := []struct {
-		name string
-		cfg  Config
-	}{
-		{"negative bind port", Config{BindTCPPorts: []int{-1}}},
-		{"overflow bind port", Config{BindTCPPorts: []int{65536}}},
-		{"negative connect port", Config{ConnectTCPPorts: []int{-1}}},
-		{"overflow connect port", Config{ConnectTCPPorts: []int{70000}}},
-		{"negative bind with unrestricted net", Config{UnrestrictedNetwork: true, BindTCPPorts: []int{-1}}},
-		{"overflow bind with unrestricted net", Config{UnrestrictedNetwork: true, BindTCPPorts: []int{65536}}},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := BuildLandlockConfig(tc.cfg)
-			if err == nil {
-				t.Errorf("expected error for %s, got nil", tc.name)
-			}
-		})
-	}
 }
 
 func runApplyInSubprocess(t *testing.T, testName string) {
@@ -534,6 +380,25 @@ func TestApplyHelperUnrestrictedNetworkWithRestrictBindTCP(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestApplyHelperUnrestrictedNetworkWithRestrictBindUDP(t *testing.T) {
+	if os.Getenv("LANDRUN_SANDBOX_HELPER") != "1" {
+		t.Skip("subprocess helper")
+	}
+	dir := t.TempDir()
+	err := Apply(Config{
+		BestEffort:              true,
+		UnrestrictedNetwork:     true,
+		UnrestrictedScoped:      true,
+		ReadOnlyPaths:           []string{dir},
+		ReadOnlyExecutablePaths: []string{"/usr"},
+		RestrictBindUDP:         true,
+	})
+	if err != nil {
+		t.Fatalf("Apply unrestricted network with restrict-bind-udp failed: %v", err)
+	}
+	os.Exit(0)
+}
+
 func TestApplyHelperEmptyRules(t *testing.T) {
 	if os.Getenv("LANDRUN_SANDBOX_HELPER") != "1" {
 		t.Skip("subprocess helper")
@@ -582,7 +447,7 @@ func TestBuildLandlockConfigABI10(t *testing.T) {
 		BindUDPPorts:    []int{53, 0},
 		ConnectUDPPorts: []int{5353},
 	}
-	llCfg, rules, err := BuildLandlockConfig(cfg)
+	llCfg, rules, err := buildLandlockConfig(cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -613,39 +478,6 @@ func TestBuildLandlockConfigABI10(t *testing.T) {
 	}
 }
 
-func TestBuildLandlockConfigBestEffort(t *testing.T) {
-	cfg := Config{
-		BestEffort:   true,
-		BindUDPPorts: []int{53},
-	}
-	llCfg, _, err := BuildLandlockConfig(cfg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(llCfg.String(), "(best effort)") {
-		t.Errorf("expected (best effort) in config string, got %s", llCfg.String())
-	}
-}
-
-func TestBuildLandlockConfigUnrestrictedNetwork(t *testing.T) {
-	cfg := Config{
-		UnrestrictedNetwork: true,
-		BindUDPPorts:        []int{53},
-		ConnectUDPPorts:     []int{53},
-	}
-	llCfg, rules, err := BuildLandlockConfig(cfg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	str := llCfg.String()
-	if !strings.Contains(str, "Net: ∅") {
-		t.Errorf("expected Net domain to be unhandled (Net: ∅), got %s", str)
-	}
-	if len(rules) != 0 {
-		t.Errorf("expected 0 rules when net unrestricted, got %d", len(rules))
-	}
-}
-
 func TestBuildLandlockConfigInvalidPorts(t *testing.T) {
 	testCases := []struct {
 		name string
@@ -659,13 +491,125 @@ func TestBuildLandlockConfigInvalidPorts(t *testing.T) {
 		{"udp bind overflow", Config{BindUDPPorts: []int{65536}}},
 		{"udp connect negative", Config{ConnectUDPPorts: []int{-10}}},
 		{"udp connect overflow", Config{ConnectUDPPorts: []int{65536}}},
+		{"tcp bind negative, unrestricted net", Config{UnrestrictedNetwork: true, BindTCPPorts: []int{-1}}},
+		{"tcp bind overflow, unrestricted net", Config{UnrestrictedNetwork: true, BindTCPPorts: []int{65536}}},
+		{"udp bind negative, unrestricted net", Config{UnrestrictedNetwork: true, BindUDPPorts: []int{-1}}},
+		{"udp bind overflow, unrestricted net", Config{UnrestrictedNetwork: true, BindUDPPorts: []int{65536}}},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := BuildLandlockConfig(tc.cfg)
+			_, _, err := buildLandlockConfig(tc.cfg)
 			if err == nil {
 				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+		})
+	}
+}
+
+// TestBuildLandlockConfigConnectUDPAllowsAutobind checks that in restricted
+// mode, --connect-udp also permits the ephemeral (port 0) autobind, without
+// duplicating it if --bind-udp 0 was given explicitly.
+func TestBuildLandlockConfigConnectUDPAllowsAutobind(t *testing.T) {
+	testCases := []struct {
+		name      string
+		cfg       Config
+		wantRules []string
+	}{
+		{"connect-udp adds port 0", Config{ConnectUDPPorts: []int{53}},
+			[]string{"ALLOW {bind_udp} on port 0", "ALLOW {connect_send_udp} on port 53"}},
+		{"explicit bind-udp 0 is not duplicated", Config{BindUDPPorts: []int{5353, 0}, ConnectUDPPorts: []int{53}},
+			[]string{"ALLOW {bind_udp} on port 5353", "ALLOW {bind_udp} on port 0", "ALLOW {connect_send_udp} on port 53"}},
+		{"bind-udp alone does not add port 0", Config{BindUDPPorts: []int{5353}},
+			[]string{"ALLOW {bind_udp} on port 5353"}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, rules, err := buildLandlockConfig(tc.cfg)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var got []string
+			for _, r := range rules {
+				got = append(got, fmt.Sprint(r))
+			}
+			if !reflect.DeepEqual(got, tc.wantRules) {
+				t.Errorf("rules = %v, want %v", got, tc.wantRules)
+			}
+		})
+	}
+}
+
+// TestBuildLandlockConfigUnrestrictedNetworkBind checks that with
+// --unrestricted-network, egress is never handled while TCP and UDP binding
+// can each still be restricted, symmetrically.
+func TestBuildLandlockConfigUnrestrictedNetworkBind(t *testing.T) {
+	testCases := []struct {
+		name      string
+		cfg       Config
+		wantNet   string
+		wantRules []string
+	}{
+		{
+			name:    "no bind restrictions leaves net unhandled",
+			cfg:     Config{UnrestrictedNetwork: true},
+			wantNet: "Net: ∅",
+		},
+		{
+			name:    "connect ports are ignored",
+			cfg:     Config{UnrestrictedNetwork: true, ConnectTCPPorts: []int{443}, ConnectUDPPorts: []int{53}},
+			wantNet: "Net: ∅",
+		},
+		{
+			name:      "bind-tcp ports",
+			cfg:       Config{UnrestrictedNetwork: true, BindTCPPorts: []int{8080, 9090}, ConnectTCPPorts: []int{443}},
+			wantNet:   "Net: {bind_tcp}",
+			wantRules: []string{"ALLOW {bind_tcp} on port 8080", "ALLOW {bind_tcp} on port 9090"},
+		},
+		{
+			name:    "restrict-bind-tcp without ports",
+			cfg:     Config{UnrestrictedNetwork: true, RestrictBindTCP: true},
+			wantNet: "Net: {bind_tcp}",
+		},
+		{
+			name:      "bind-udp ports also permit ephemeral autobind",
+			cfg:       Config{UnrestrictedNetwork: true, BindUDPPorts: []int{5353}, ConnectUDPPorts: []int{53}},
+			wantNet:   "Net: {bind_udp}",
+			wantRules: []string{"ALLOW {bind_udp} on port 0", "ALLOW {bind_udp} on port 5353"},
+		},
+		{
+			name:      "restrict-bind-udp without ports",
+			cfg:       Config{UnrestrictedNetwork: true, RestrictBindUDP: true},
+			wantNet:   "Net: {bind_udp}",
+			wantRules: []string{"ALLOW {bind_udp} on port 0"},
+		},
+		{
+			name:      "tcp and udp together",
+			cfg:       Config{UnrestrictedNetwork: true, BindTCPPorts: []int{8080}, BindUDPPorts: []int{5353}},
+			wantNet:   "Net: {bind_tcp,bind_udp}",
+			wantRules: []string{"ALLOW {bind_tcp} on port 8080", "ALLOW {bind_udp} on port 0", "ALLOW {bind_udp} on port 5353"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Keep the FS domain handled so llCfg is never nil.
+			tc.cfg.ReadOnlyPaths = []string{"/usr"}
+			llCfg, rules, err := buildLandlockConfig(tc.cfg)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if str := llCfg.String(); !strings.Contains(str, tc.wantNet) {
+				t.Errorf("expected %q in config, got %s", tc.wantNet, str)
+			}
+			var netRules []string
+			for _, r := range rules {
+				if rs := fmt.Sprint(r); strings.Contains(rs, " on port ") {
+					netRules = append(netRules, rs)
+				}
+			}
+			if !reflect.DeepEqual(netRules, tc.wantRules) {
+				t.Errorf("net rules = %v, want %v", netRules, tc.wantRules)
 			}
 		})
 	}

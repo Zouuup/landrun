@@ -53,7 +53,7 @@ func newApp() *cli.Command {
 			},
 			&cli.StringSliceFlag{
 				Name:      "bind-tcp",
-				Usage:     "Allow binding to these TCP ports (single port or range, e.g. 8080 or 32000-32768; restricts TCP binding even if network egress is unrestricted)",
+				Usage:     "Allow binding to these TCP ports (single port or range, e.g. 8080 or 32000-32768); with --unrestricted-network, TCP binding stays restricted to these ports",
 				Validator: validatePortSpecs,
 			},
 			&cli.StringSliceFlag{
@@ -63,22 +63,27 @@ func newApp() *cli.Command {
 			},
 			&cli.StringSliceFlag{
 				Name:      "bind-udp",
-				Usage:     "Allow binding to these UDP ports (single port or range; Landlock ABI v10+)",
+				Usage:     "Allow binding to these UDP ports (single port or range; Landlock ABI v10+); with --unrestricted-network, UDP binding stays restricted to these ports plus ephemeral port 0",
 				Validator: validatePortSpecs,
 			},
 			&cli.StringSliceFlag{
 				Name:      "connect-udp",
-				Usage:     "Allow connecting/sending to these UDP ports (single port or range; Landlock ABI v10+)",
+				Usage:     "Allow connecting/sending to these UDP ports (single port or range; Landlock ABI v10+); also allows binding ephemeral port 0, which unbound sockets need to send",
 				Validator: validatePortSpecs,
 			},
 			&cli.BoolFlag{
 				Name:  "restrict-bind-tcp",
-				Usage: "Restrict TCP port binding independently of outgoing network access",
+				Usage: "With --unrestricted-network, still deny TCP binding except to --bind-tcp ports (no effect otherwise)",
+				Value: false,
+			},
+			&cli.BoolFlag{
+				Name:  "restrict-bind-udp",
+				Usage: "With --unrestricted-network, still deny UDP binding except to --bind-udp ports and ephemeral ports (Landlock ABI v10+; no effect otherwise)",
 				Value: false,
 			},
 			&cli.BoolFlag{
 				Name:  "best-effort",
-				Usage: "Use best effort mode (fall back to less restrictive sandbox if necessary)",
+				Usage: "Run even if the kernel cannot enforce options passed explicitly (e.g. --connect-udp needs Landlock ABI v10), skipping those restrictions",
 				Value: false,
 			},
 			&cli.StringSliceFlag{
@@ -93,7 +98,7 @@ func newApp() *cli.Command {
 			&cli.BoolFlag{
 				Name:    "unrestricted-network",
 				Aliases: []string{"unrestricted-egress"},
-				Usage:   "Allow unrestricted network access (or unrestricted egress when combined with bind-tcp restrictions)",
+				Usage:   "Allow unrestricted network access; TCP/UDP binding stays restricted if --bind-tcp/--bind-udp or --restrict-bind-tcp/--restrict-bind-udp are given",
 				Value:   false,
 			},
 			&cli.BoolFlag{
@@ -202,15 +207,12 @@ func buildConfig(c *cli.Command, binary string, libPaths []string) sandbox.Confi
 		UnrestrictedNetwork:      c.Bool("unrestricted-network"),
 		UnrestrictedScoped:       c.Bool("unrestricted-scoped"),
 		RestrictBindTCP:          c.Bool("restrict-bind-tcp"),
+		RestrictBindUDP:          c.Bool("restrict-bind-udp"),
 		IgnoreMissingPaths:       c.Bool("ignore-missing"),
 		DisableLogOriginating:    c.Bool("log-disable-originating"),
 		EnableLogSubprocesses:    c.Bool("log-enable-subprocesses"),
 		DisableLogSubdomains:     c.Bool("log-disable-subdomains"),
 	}
-}
-
-func parseSandboxConfig(c *cli.Command) sandbox.Config {
-	return buildConfig(c, "", nil)
 }
 
 // parsePortSpecs expands port specs such as "8080" or "32000-32768" into
@@ -268,6 +270,7 @@ func portsFlag(c *cli.Command, name string) []int {
 	}
 	return ports
 }
+
 func main() {
 	app := newApp()
 	if err := app.Run(context.Background(), os.Args); err != nil {

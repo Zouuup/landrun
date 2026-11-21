@@ -435,6 +435,24 @@ func TestParseSandboxConfig(t *testing.T) {
 			},
 		},
 		{
+			name:    "unrestricted network with bind-udp and restrict-bind-udp",
+			cliArgs: []string{"landrun", "--unrestricted-network", "--restrict-bind-udp", "--bind-udp", "5353", "dummy"},
+			validate: func(t *testing.T, cfg sandbox.Config) {
+				if !cfg.UnrestrictedNetwork {
+					t.Errorf("expected UnrestrictedNetwork to be true")
+				}
+				if !cfg.RestrictBindUDP {
+					t.Errorf("expected RestrictBindUDP to be true")
+				}
+				if cfg.RestrictBindTCP {
+					t.Errorf("expected RestrictBindTCP to be false")
+				}
+				if !reflect.DeepEqual(cfg.BindUDPPorts, []int{5353}) {
+					t.Errorf("expected BindUDPPorts [5353], got %v", cfg.BindUDPPorts)
+				}
+			},
+		},
+		{
 			name:    "unrestricted network with explicit restrict-bind-tcp",
 			cliArgs: []string{"landrun", "--unrestricted-network", "--restrict-bind-tcp", "dummy"},
 			validate: func(t *testing.T, cfg sandbox.Config) {
@@ -498,7 +516,7 @@ func TestParseSandboxConfig(t *testing.T) {
 			app := newApp()
 			var capturedCfg sandbox.Config
 			app.Action = func(ctx context.Context, c *cli.Command) error {
-				capturedCfg = parseSandboxConfig(c)
+				capturedCfg = buildConfig(c, "", nil)
 				return nil
 			}
 
