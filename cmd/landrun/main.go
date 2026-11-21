@@ -53,7 +53,7 @@ func newApp() *cli.Command {
 			},
 			&cli.StringSliceFlag{
 				Name:      "bind-tcp",
-				Usage:     "Allow binding to these TCP ports (single port or range, e.g. 8080 or 32000-32768)",
+				Usage:     "Allow binding to these TCP ports (single port or range, e.g. 8080 or 32000-32768; restricts TCP binding even if network egress is unrestricted)",
 				Validator: validatePortSpecs,
 			},
 			&cli.StringSliceFlag{
@@ -72,6 +72,11 @@ func newApp() *cli.Command {
 				Validator: validatePortSpecs,
 			},
 			&cli.BoolFlag{
+				Name:  "restrict-bind-tcp",
+				Usage: "Restrict TCP port binding independently of outgoing network access",
+				Value: false,
+			},
+			&cli.BoolFlag{
 				Name:  "best-effort",
 				Usage: "Use best effort mode (fall back to less restrictive sandbox if necessary)",
 				Value: false,
@@ -86,9 +91,10 @@ func newApp() *cli.Command {
 				Value: false,
 			},
 			&cli.BoolFlag{
-				Name:  "unrestricted-network",
-				Usage: "Allow unrestricted network access",
-				Value: false,
+				Name:    "unrestricted-network",
+				Aliases: []string{"unrestricted-egress"},
+				Usage:   "Allow unrestricted network access (or unrestricted egress when combined with bind-tcp restrictions)",
+				Value:   false,
 			},
 			&cli.BoolFlag{
 				Name:  "unrestricted-scoped",
@@ -195,11 +201,16 @@ func buildConfig(c *cli.Command, binary string, libPaths []string) sandbox.Confi
 		UnrestrictedFilesystem:   c.Bool("unrestricted-filesystem"),
 		UnrestrictedNetwork:      c.Bool("unrestricted-network"),
 		UnrestrictedScoped:       c.Bool("unrestricted-scoped"),
+		RestrictBindTCP:          c.Bool("restrict-bind-tcp"),
 		IgnoreMissingPaths:       c.Bool("ignore-missing"),
 		DisableLogOriginating:    c.Bool("log-disable-originating"),
 		EnableLogSubprocesses:    c.Bool("log-enable-subprocesses"),
 		DisableLogSubdomains:     c.Bool("log-disable-subdomains"),
 	}
+}
+
+func parseSandboxConfig(c *cli.Command) sandbox.Config {
+	return buildConfig(c, "", nil)
 }
 
 // parsePortSpecs expands port specs such as "8080" or "32000-32768" into
@@ -257,7 +268,6 @@ func portsFlag(c *cli.Command, name string) []int {
 	}
 	return ports
 }
-
 func main() {
 	app := newApp()
 	if err := app.Run(context.Background(), os.Args); err != nil {

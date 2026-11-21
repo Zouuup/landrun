@@ -596,6 +596,71 @@ run_test "Unrestricted filesystem still restricts network without connect-tcp" \
     "./landrun --log-level debug --unrestricted-filesystem --add-exec --ldd -- $PROBE tcp-connect $BIND_PORT_OTHER" \
     $DENIED
 
+# --- Decoupled bind-tcp tests with unrestricted network ---
+run_test "TCP bind allowed on permitted port with --unrestricted-network" \
+    "$PY_LANDRUN --unrestricted-network --bind-tcp $BIND_PORT -- $PYTHON -c \"
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $BIND_PORT))
+s.close()
+\"" \
+    0
+
+run_test "TCP bind denied on non-permitted port with --unrestricted-network" \
+    "$PY_LANDRUN --unrestricted-network --bind-tcp $BIND_PORT -- $PYTHON -c \"
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(('127.0.0.1', $BIND_PORT_OTHER))
+except OSError:
+    sys.exit(1)
+sys.exit(0)
+\"" \
+    1
+
+# Listener outside sandbox to verify outbound connect succeeds without connect-tcp
+$PYTHON -c "
+import socket, time, os, signal
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $BIND_PORT))
+s.listen(1)
+os.write(1, b'ready\n')
+conn, _ = s.accept()
+conn.close()
+s.close()
+" > "$TEST_DIR/listener2.out" 2>&1 &
+LISTENER2_PID=$!
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    if grep -q ready "$TEST_DIR/listener2.out" 2>/dev/null; then break; fi
+    sleep 0.1
+done
+
+run_test "TCP connect allowed with --unrestricted-network and --bind-tcp" \
+    "$PY_LANDRUN --unrestricted-network --bind-tcp $BIND_PORT_OTHER -- $PYTHON -c \"
+import socket
+s = socket.create_connection(('127.0.0.1', $BIND_PORT), timeout=2)
+s.close()
+\"" \
+    0
+
+wait $LISTENER2_PID 2>/dev/null || true
+
+run_test "TCP bind denied with --unrestricted-network and --restrict-bind-tcp" \
+    "$PY_LANDRUN --unrestricted-network --restrict-bind-tcp -- $PYTHON -c \"
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(('127.0.0.1', $BIND_PORT))
+except OSError:
+    sys.exit(1)
+sys.exit(0)
+\"" \
+    1
+
 # --- Unrestricted / domain combos ---
 run_test "All domains unrestricted is a no-op sandbox" \
     "./landrun --log-level debug --unrestricted-filesystem --unrestricted-network --unrestricted-scoped -- echo ok" \
