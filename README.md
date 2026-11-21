@@ -389,6 +389,7 @@ These are restricted by default and can be relaxed with `--unrestricted-scoped`.
 - TCP restrictions only apply to "classic" TCP sockets, not Multipath TCP. Since Go 1.24, `net.Listen` defaults to Multipath TCP and therefore cannot currently be restricted by Landlock (kernel bug [landlock-lsm/linux#54](https://github.com/landlock-lsm/linux/issues/54))
 - Some operations may require additional permissions
 - Files or directories opened before sandboxing are not subject to Landlock restrictions
+- setuid/setgid binaries and file capabilities cannot gain privileges inside landrun (e.g. `sudo`, `pkexec`, `su`), because Landlock requires the `no_new_privs` flag. Gain privileges before sandboxing instead, e.g. `sudo landrun ...`
 
 ## Kernel Compatibility Table
 
