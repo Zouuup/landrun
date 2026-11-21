@@ -31,7 +31,10 @@ jobs:
         run: go mod download
 
       - name: Build
-        run: go build -v -o landrun ./cmd/landrun/main.go
+        # Static binary (no glibc dependency), like the release builds.
+        env:
+          CGO_ENABLED: "0"
+        run: go build -v -trimpath -o landrun ./cmd/landrun
 
       - name: Upload binary
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0

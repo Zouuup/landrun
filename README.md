@@ -45,12 +45,25 @@ It's lightweight, auditable, and wraps Landlock up to v11 features (file access,
 go install github.com/zouuup/landrun/cmd/landrun@latest
 ```
 
+### Prebuilt Binaries
+
+Each [release](https://github.com/Zouuup/landrun/releases) has statically linked binaries that run on any Linux distribution: `landrun-linux-amd64`, `-arm64`, `-arm` (ARMv7), `-386`, `-riscv64`, `-ppc64le`, `-s390x` and `-loong64`. There is also `landrun-linux-amd64-glibc`, which is dynamically linked and needs glibc 2.35+ (Ubuntu 22.04 or newer); most users want `landrun-linux-amd64`.
+
+Binaries are built by the release workflow in this repository. To verify a download:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify landrun-linux-amd64 --repo Zouuup/landrun
+```
+
+The second command checks that the binary was built by this repository's GitHub Actions workflow from the tagged source.
+
 ### From Source
 
 ```bash
 git clone https://github.com/zouuup/landrun.git
 cd landrun
-go build -o landrun cmd/landrun/main.go
+CGO_ENABLED=0 go build -trimpath -o landrun ./cmd/landrun
 sudo cp landrun /usr/local/bin/
 ```
 

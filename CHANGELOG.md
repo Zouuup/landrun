@@ -46,9 +46,15 @@
   UDP binding except to ephemeral port 0. UDP bind restrictions need ABI v10:
   without `--best-effort` they fail on older kernels, and with it they are
   skipped with a warning.
+- Release binaries are built by a GitHub Actions workflow for amd64, arm64,
+  ARMv7, 386, riscv64, ppc64le, s390x and loong64, with a `SHA256SUMS` file
+  and build provenance attestations (`gh attestation verify`). A dynamically
+  linked `landrun-linux-amd64-glibc` (glibc 2.35+) is also provided.
 
 ### Fixed
 
+- Release binaries failed on older distributions such as Ubuntu 22.04 with
+  "version 'GLIBC_2.38' not found" (#69). They are now statically linked.
 - Port flags are validated: a port outside 0-65535, a non-numeric value or a
   malformed range is rejected before the command runs. v0.1.17 silently
   wrapped out-of-range TCP ports, so `--bind-tcp 70000` allowed port 4464.

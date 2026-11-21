@@ -1,0 +1,177 @@
+name: Release
+
+# Builds release binaries for a pushed vX.Y.Z tag, attests their build
+# provenance, and publishes them as a GitHub release with all assets
+# attached at publish time (as required for immutable releases).
+#
+# Verify a downloaded binary with:
+#   gh attestation verify landrun-linux-amd64 --repo Zouuup/landrun
+#   sha256sum --check --ignore-missing SHA256SUMS
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check version and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        with:
+          go-version-file: go.mod
+
+      - name: Tag matches the version in the code
+        run: |
+          code_version=$(sed -n 's/^const Version = "\(.*\)"$/\1/p' cmd/landrun/main.go)
+          if [ "v${code_version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match Version \"${code_version}\" in cmd/landrun/main.go"
+            exit 1
+          fi
+
+      - name: Vet and unit tests
+        run: |
+          go vet ./...
+          go test ./...
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: check
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Static binaries (CGO_ENABLED=0): no libc dependency, run on any
+          # Linux distribution of the matching architecture.
+          - { name: landrun-linux-amd64, goarch: amd64, cgo: "0", runner: ubuntu-latest, smoke: true }
+          - { name: landrun-linux-arm64, goarch: arm64, cgo: "0", runner: ubuntu-24.04-arm, smoke: true }
+          - { name: landrun-linux-arm, goarch: arm, goarm: "7", cgo: "0", runner: ubuntu-latest }
+          - { name: landrun-linux-386, goarch: "386", cgo: "0", runner: ubuntu-latest }
+          - { name: landrun-linux-riscv64, goarch: riscv64, cgo: "0", runner: ubuntu-latest }
+          - { name: landrun-linux-ppc64le, goarch: ppc64le, cgo: "0", runner: ubuntu-latest }
+          - { name: landrun-linux-s390x, goarch: s390x, cgo: "0", runner: ubuntu-latest }
+          - { name: landrun-linux-loong64, goarch: loong64, cgo: "0", runner: ubuntu-latest }
+          # Dynamically linked against glibc, with go-landlock's cgo-based
+          # libpsx. Built on the oldest available runner so it needs only
+          # glibc 2.35+ (Ubuntu 22.04 and newer).
+          - { name: landrun-linux-amd64-glibc, goarch: amd64, cgo: "1", runner: ubuntu-22.04, smoke: true }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -o "dist/${{ matrix.name }}" ./cmd/landrun
+          file "dist/${{ matrix.name }}"
+
+      - name: Check linking
+        run: |
+          if [ "${{ matrix.cgo }}" = "0" ]; then
+            file "dist/${{ matrix.name }}" | grep -q "statically linked" \
+              || { echo "::error::expected a statically linked binary"; exit 1; }
+          else
+            # The release notes promise glibc 2.35+ (Ubuntu 22.04).
+            needed=$(objdump -T "dist/${{ matrix.name }}" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+            echo "Highest required glibc version: ${needed}"
+            if [ "$(printf '%s\n' "${needed}" 2.35 | sort -V | tail -1)" != 2.35 ]; then
+              echo "::error::binary needs glibc ${needed}, but the release notes promise 2.35+"
+              exit 1
+            fi
+          fi
+
+      - name: Smoke test
+        if: matrix.smoke
+        run: |
+          "dist/${{ matrix.name }}" --version
+          "dist/${{ matrix.name }}" --version | grep -qF "${GITHUB_REF_NAME#v}"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the provenance attestation
+      attestations: write # store the provenance attestation
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Download binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: landrun-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          chmod +x landrun-linux-*
+          sha256sum landrun-linux-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/landrun-linux-*
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="## ${version}" '
+            $0 == v { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::No '## ${version}' section in CHANGELOG.md"
+            exit 1
+          fi
+          cat >> notes.md <<'EOF'
+
+          ### Binaries
+
+          The `landrun-linux-<arch>` binaries are statically linked and run on any Linux distribution. `landrun-linux-amd64-glibc` is dynamically linked and needs glibc 2.35+ (Ubuntu 22.04 or newer); most users want `landrun-linux-amd64` instead.
+
+          Verify a download with `sha256sum --check --ignore-missing SHA256SUMS`, and check that it was built by this repository's release workflow with `gh attestation verify <binary> --repo Zouuup/landrun`.
+          EOF
+
+      # Create as a draft, upload every asset, then publish: with immutable
+      # releases enabled, assets can no longer be added after publishing.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --verify-tag \
+            --draft \
+            --title "landrun ${GITHUB_REF_NAME}" \
+            --notes-file notes.md
+          gh release edit "${GITHUB_REF_NAME}" --draft=false
