@@ -224,7 +224,7 @@ func Apply(cfg Config) error {
 		return err
 	}
 	for _, s := range rep.skipped {
-		log.Info("%s", s) // the user opted into this with --best-effort
+		log.Warn("%s", s)
 	}
 	for _, w := range rep.warnings {
 		log.Warn("%s", w)

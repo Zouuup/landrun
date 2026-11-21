@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/landlock-lsm/go-landlock v0.11.2
-	github.com/urfave/cli/v3 v3.6.2
+	github.com/urfave/cli/v3 v3.14.0
 )
 
 require (

@@ -139,10 +139,11 @@ type compatReport struct {
 	// skipped lists explicitly requested restrictions the kernel cannot
 	// enforce. Only possible with --best-effort; strict mode errors instead.
 	skipped []string
-	// warnings lists everything else the user must know about: default
-	// restrictions that are not enforced, or the sandbox being disabled.
-	// These are shown at every log level, with or without --best-effort.
+	// warnings lists default restrictions that are not enforced, or the
+	// sandbox being disabled entirely.
 	warnings []string
+	// Both are always shown, at every log level: a restriction that is not
+	// applied must never go unnoticed.
 }
 
 // checkCompatibility compares cfg against the kernel's Landlock ABI.

@@ -17,7 +17,7 @@ import (
 )
 
 // Version is the current version of landrun
-const Version = "0.1.18"
+const Version = "0.2.0"
 
 func newApp() *cli.Command {
 	return &cli.Command{
@@ -53,12 +53,12 @@ func newApp() *cli.Command {
 			},
 			&cli.StringSliceFlag{
 				Name:      "bind-tcp",
-				Usage:     "Allow binding to these TCP ports (single port or range, e.g. 8080 or 32000-32768); with --unrestricted-network, TCP binding stays restricted to these ports",
+				Usage:     "Allow binding to these TCP ports (single port or range, e.g. 8080 or 32000-32768; Landlock ABI v4+); with --unrestricted-network, TCP binding stays restricted to these ports",
 				Validator: validatePortSpecs,
 			},
 			&cli.StringSliceFlag{
 				Name:      "connect-tcp",
-				Usage:     "Allow connecting to these TCP ports (single port or range, e.g. 443 or 32000-32768)",
+				Usage:     "Allow connecting to these TCP ports (single port or range, e.g. 443 or 32000-32768; Landlock ABI v4+)",
 				Validator: validatePortSpecs,
 			},
 			&cli.StringSliceFlag{
@@ -73,17 +73,17 @@ func newApp() *cli.Command {
 			},
 			&cli.BoolFlag{
 				Name:  "restrict-bind-tcp",
-				Usage: "With --unrestricted-network, still deny TCP binding except to --bind-tcp ports (no effect otherwise)",
+				Usage: "With --unrestricted-network, still deny TCP binding except to --bind-tcp ports (Landlock ABI v4+; no effect otherwise)",
 				Value: false,
 			},
 			&cli.BoolFlag{
 				Name:  "restrict-bind-udp",
-				Usage: "With --unrestricted-network, still deny UDP binding except to --bind-udp ports and ephemeral ports (Landlock ABI v10+; no effect otherwise)",
+				Usage: "With --unrestricted-network, still deny UDP binding except to --bind-udp ports and ephemeral port 0 (Landlock ABI v10+; no effect otherwise)",
 				Value: false,
 			},
 			&cli.BoolFlag{
 				Name:  "best-effort",
-				Usage: "Run even if the kernel cannot enforce options passed explicitly (e.g. --connect-udp needs Landlock ABI v10), skipping those restrictions",
+				Usage: "Run even if the kernel cannot enforce options passed explicitly (e.g. --connect-udp needs Landlock ABI v10), skipping those restrictions with a warning; without Landlock (or on ABI v1 with --rw/--rwx on a directory) the command runs unsandboxed",
 				Value: false,
 			},
 			&cli.StringSliceFlag{
@@ -96,10 +96,9 @@ func newApp() *cli.Command {
 				Value: false,
 			},
 			&cli.BoolFlag{
-				Name:    "unrestricted-network",
-				Aliases: []string{"unrestricted-egress"},
-				Usage:   "Allow unrestricted network access; TCP/UDP binding stays restricted if --bind-tcp/--bind-udp or --restrict-bind-tcp/--restrict-bind-udp are given",
-				Value:   false,
+				Name:  "unrestricted-network",
+				Usage: "Allow unrestricted network access; TCP/UDP binding stays restricted if --bind-tcp/--bind-udp or --restrict-bind-tcp/--restrict-bind-udp are given",
+				Value: false,
 			},
 			&cli.BoolFlag{
 				Name:  "unrestricted-scoped",

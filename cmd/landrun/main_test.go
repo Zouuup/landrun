@@ -423,18 +423,6 @@ func TestParseSandboxConfig(t *testing.T) {
 			},
 		},
 		{
-			name:    "unrestricted egress alias with bind tcp",
-			cliArgs: []string{"landrun", "--unrestricted-egress", "--bind-tcp", "8080,9090", "dummy"},
-			validate: func(t *testing.T, cfg sandbox.Config) {
-				if !cfg.UnrestrictedNetwork {
-					t.Errorf("expected UnrestrictedNetwork to be true via --unrestricted-egress alias")
-				}
-				if !reflect.DeepEqual(cfg.BindTCPPorts, []int{8080, 9090}) {
-					t.Errorf("expected BindTCPPorts [8080 9090], got %v", cfg.BindTCPPorts)
-				}
-			},
-		},
-		{
 			name:    "unrestricted network with bind-udp and restrict-bind-udp",
 			cliArgs: []string{"landrun", "--unrestricted-network", "--restrict-bind-udp", "--bind-udp", "5353", "dummy"},
 			validate: func(t *testing.T, cfg sandbox.Config) {
@@ -525,5 +513,30 @@ func TestParseSandboxConfig(t *testing.T) {
 			}
 			tc.validate(t, capturedCfg)
 		})
+	}
+}
+
+// TestCommandNamedLikeFlag guards against a urfave/cli bug (fixed in
+// v3.14.0): a command named like a flag that was used, e.g.
+// `landrun --env HOME -- env`, came through with an empty args[0].
+func TestCommandNamedLikeFlag(t *testing.T) {
+	for _, argv := range [][]string{
+		{"landrun", "--env", "HOME", "--", "env", "-0"},
+		{"landrun", "--env", "HOME", "env"},
+		{"landrun", "--ro", "/etc", "--", "ro"},
+	} {
+		app := newApp()
+		app.Before = nil
+		var got []string
+		app.Action = func(ctx context.Context, c *cli.Command) error {
+			got = c.Args().Slice()
+			return nil
+		}
+		if err := app.Run(context.Background(), argv); err != nil {
+			t.Fatalf("%q: %v", argv, err)
+		}
+		if len(got) == 0 || got[0] == "" {
+			t.Errorf("%q: args = %q, want the command name first", argv, got)
+		}
 	}
 }
